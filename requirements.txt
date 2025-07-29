@@ -1,0 +1,6 @@
+fastapi
+pydantic
+uvicorn
+gunicorn # Required for Heroku to run ASGI apps
+# If you were making real HTTP requests to the LLM, you'd add:
+# httpx
