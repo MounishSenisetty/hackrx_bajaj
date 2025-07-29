@@ -1,6 +1,4 @@
 fastapi
 pydantic
 uvicorn
-# Vercel's build environment handles the ASGI server, so gunicorn is not strictly needed for Vercel
-# If you were making real HTTP requests to the LLM, you'd add:
-# httpx
+httpx # Added for making actual HTTP requests to external APIs
