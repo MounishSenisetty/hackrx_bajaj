@@ -1,14 +1,26 @@
 {
-  "builds": [
-    {
-      "src": "main.py",
-      "use": "@vercel/python"
+  "functions": {
+    "api/index.py": {
+      "runtime": "@vercel/python@4.3.0",
+      "maxDuration": 30
     }
-  ],
+  },
   "routes": [
     {
+      "src": "/hackrx/run",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/health",
+      "dest": "/api/index.py"
+    },
+    {
+      "src": "/system/info",
+      "dest": "/api/index.py"
+    },
+    {
       "src": "/(.*)",
-      "dest": "main.py"
+      "dest": "/api/index.py"
     }
   ]
 }
