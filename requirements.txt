@@ -1,6 +1,6 @@
 fastapi
 pydantic
 uvicorn
-gunicorn # Required for Heroku to run ASGI apps
+# Vercel's build environment handles the ASGI server, so gunicorn is not strictly needed for Vercel
 # If you were making real HTTP requests to the LLM, you'd add:
 # httpx
