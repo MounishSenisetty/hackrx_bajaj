@@ -1,20 +1,20 @@
-# LLM-Powered Intelligent Query-Retrieval System
+# Natural LLM-Powered Document Query System
 
 ## 🎯 Overview
 
-An advanced document processing and query-retrieval system that leverages Large Language Models (LLMs) and intelligent text processing to provide accurate, contextual answers from any type of PDF document. Works with insurance policies, research papers, contracts, manuals, reports, and any other PDF document type.
+An advanced document processing and query-retrieval system that leverages Large Language Models (LLMs) and semantic search to provide accurate, contextual answers from any type of PDF document. The system uses **natural language understanding** without hardcoded patterns, ensuring genuine AI-powered analysis of document content.
 
 ## 🏗️ System Architecture
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
 │  Input Documents │───▶│   PDF Parser     │───▶│ Smart Chunking  │
-│  (Any PDF Type) │    │ PyPDF2 Extract   │    │ Adaptive Strategy│
+│  (Any PDF Type) │    │ PyPDF2 Extract   │    │ Semantic Chunks │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
                                                           │
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   JSON Output   │◀───│ Multi-LLM Chain  │◀───│ Semantic Search │
-│ Structured Resp │    │OpenAI→Claude→HF  │    │Pattern Matching │
+│   Natural JSON  │◀───│ Multi-LLM Chain  │◀───│ Vector Database │
+│ AI-Generated    │    │OpenAI→Claude→HF  │    │FAISS Semantic   │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
 ```
 
@@ -23,11 +23,12 @@ An advanced document processing and query-retrieval system that leverages Large 
 ### 📄 Document Processing
 - **Universal PDF Support**: Works with any PDF document type - policies, research papers, manuals, contracts, reports
 - **Intelligent Text Extraction**: PyPDF2-powered extraction with fallback mechanisms
-- **Adaptive Chunking**: Automatically detects document structure (sections, paragraphs, sentences)
-- **Large Document Handling**: Efficient processing of documents up to 10MB
+- **Natural Chunking**: Document-aware segmentation without predetermined patterns
+- **Large Document Handling**: Efficient processing of documents up to 15+ pages
 
-### 🔍 Advanced Search & Retrieval
-- **Intelligent Search**: Context-aware keyword matching with phrase detection
+### 🔍 Natural AI-Powered Search & Retrieval
+- **Semantic Search**: Vector database (FAISS) for true semantic similarity matching
+- **Natural Language Understanding**: LLMs analyze document context without hardcoded patterns
 - **Multi-Strategy Chunking**: Section-based, paragraph-based, and sentence-based chunking
 - **Relevance Scoring**: Dynamic scoring based on content type and question pattern
 - **Generic Pattern Matching**: Works across document types with adaptive algorithms
