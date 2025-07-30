@@ -10,6 +10,14 @@ curl -v -X POST "https://hackrx-bajaj.vercel.app/hackrx/run" \
     "documents": "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D",
     "questions": [
         "What is the grace period for premium payment under the National Parivar Mediclaim Plus Policy?",
-        "What is the waiting period for pre-existing diseases (PED) to be covered?"
+        "What is the waiting period for pre-existing diseases (PED) to be covered?",
+        "Does the policy cover maternity expenses?",
+        "What is the waiting period for cataract surgery?",
+        "Are medical expenses for organ donors covered?",
+        "What is the No Claim Discount offered on renewal?",
+        "Are preventive health check-ups covered?",
+        "How is a hospital defined under this policy?",
+        "Are AYUSH treatments covered?",
+        "What is the room rent limit as a percentage of the Sum Insured?"
     ]
   }'
