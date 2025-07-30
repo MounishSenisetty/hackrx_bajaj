@@ -10,6 +10,7 @@ import io
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field
+from typing import List
 try:
     import PyPDF2
     PDF_AVAILABLE = True
@@ -23,7 +24,10 @@ app = FastAPI(title="Vercel-Compatible Document Query System", version="1.0.0")
 class Config:
     BEARER_TOKEN = os.getenv("BEARER_TOKEN", "ca6914a6c8df9d1ce075149c3ab9f060e666c75940576e37a98b3cf0e9092c72")
     HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
-    HUGGINGFACE_MODEL = "google/flan-t5-base"
+    HUGGINGFACE_MODEL = "deepset/roberta-base-squad2"
+    CHUNK_SIZE = 400  # characters per chunk
+    CHUNK_OVERLAP = 50
+    MAX_CHUNKS = 10
     REQUEST_TIMEOUT = 30.0
     MAX_DOCUMENT_SIZE = 10 * 1024 * 1024
 
@@ -124,30 +128,31 @@ def smart_chunk_text(text: str) -> List[str]:
 
 
 
-# Vercel-compatible: Use HuggingFace Inference API for answers
-async def call_huggingface_api(question: str, context: str = "") -> str:
+
+# QA-specific: Use HuggingFace extractive QA model for answers
+async def call_huggingface_qa_api(question: str, context: str = "") -> str:
     if not Config.HUGGINGFACE_API_KEY:
         return "HuggingFace API key not set."
-    prompt = f"Answer the following question as accurately as possible.\n\nQuestion: {question}\nContext: {context}\nAnswer:"
     url = f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}"
     headers = {
         "Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}",
         "Content-Type": "application/json"
     }
-    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 200}}
+    payload = {"inputs": {"question": question, "context": context}}
     try:
         async with httpx.AsyncClient(timeout=Config.REQUEST_TIMEOUT) as client:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             result = response.json()
-            if isinstance(result, list) and len(result) > 0 and "generated_text" in result[0]:
-                return result[0]["generated_text"].replace(prompt, "").strip()
-            elif isinstance(result, dict) and "generated_text" in result:
-                return result["generated_text"].replace(prompt, "").strip()
+            # Model returns a dict with 'answer' key
+            if isinstance(result, dict) and "answer" in result:
+                return result["answer"]
+            elif isinstance(result, list) and len(result) > 0 and "answer" in result[0]:
+                return result[0]["answer"]
             else:
                 return str(result)
     except Exception as e:
-        return f"Error calling HuggingFace API: {e}"
+        return f"Error calling HuggingFace QA API: {e}"
 
 
 # API Endpoints
@@ -163,8 +168,27 @@ async def run_submissions(req: RunRequest, http_req: Request):
         doc_text = await fetch_document(req.documents)
         if not doc_text or len(doc_text.strip()) < 10:
             raise HTTPException(400, "Failed to extract content from document")
-        # For Vercel: just use the full doc as context for each question
-        answers = [await call_huggingface_api(q, doc_text) for q in req.questions]
+        # Chunk the document for QA
+        chunks = []
+        text = doc_text
+        chunk_size = Config.CHUNK_SIZE
+        overlap = Config.CHUNK_OVERLAP
+        max_chunks = Config.MAX_CHUNKS
+        start = 0
+        while start < len(text) and len(chunks) < max_chunks:
+            end = min(start + chunk_size, len(text))
+            chunk = text[start:end]
+            chunks.append(chunk)
+            start += chunk_size - overlap
+        answers = []
+        for q in req.questions:
+            found_answer = None
+            for chunk in chunks:
+                answer = await call_huggingface_qa_api(q, chunk)
+                if answer.strip().lower() not in ["", "n/a", "no answer", "empty", "none"]:
+                    found_answer = answer.strip()
+                    break
+            answers.append(found_answer if found_answer else "Could not find a specific answer in the document.")
         return RunResponse(answers=answers)
     except HTTPException as he:
         raise he

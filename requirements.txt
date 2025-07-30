@@ -2,5 +2,4 @@ fastapi
 httpx
 pydantic
 PyPDF2
-sentence-transformers
 
