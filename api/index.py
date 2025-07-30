@@ -21,7 +21,7 @@ class Config:
     # API Keys - prioritize environment variables
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-    HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "hf_demo_key_public")
+    HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
     
     # LLM Models and endpoints
     OPENAI_MODEL = "gpt-3.5-turbo"
