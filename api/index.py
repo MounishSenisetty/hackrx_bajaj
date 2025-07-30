@@ -24,7 +24,7 @@ app = FastAPI(title="Vercel-Compatible Document Query System", version="1.0.0")
 class Config:
     BEARER_TOKEN = os.getenv("BEARER_TOKEN", "ca6914a6c8df9d1ce075149c3ab9f060e666c75940576e37a98b3cf0e9092c72")
     HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
-    HUGGINGFACE_MODEL = "google/flan-t5-base"
+    HUGGINGFACE_MODEL = "tiiuae/falcon-7b-instruct"
     CHUNK_SIZE = 400  # characters per chunk
     CHUNK_OVERLAP = 50
     MAX_CHUNKS = 10
