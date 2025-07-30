@@ -1,6 +1,5 @@
-fastapi
-httpx
-pydantic
-uvicorn
-anthropic
-openai
+fastapi==0.104.1
+httpx==0.25.2
+pydantic==2.5.2
+uvicorn==0.24.0
+transformers==4.36.2

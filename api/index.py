@@ -21,12 +21,12 @@ class Config:
     # API Keys - prioritize environment variables
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-    HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
+    HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "hf_demo_key_public")
     
     # LLM Models and endpoints
     OPENAI_MODEL = "gpt-3.5-turbo"
     ANTHROPIC_MODEL = "claude-3-haiku-20240307"
-    HUGGINGFACE_MODEL = "microsoft/DialoGPT-large"
+    HUGGINGFACE_MODEL = "mistralai/Mixtral-8x7B-Instruct-v0.1"
     
     REQUEST_TIMEOUT = 30.0
     MAX_DOCUMENT_SIZE = 10 * 1024 * 1024
@@ -194,41 +194,78 @@ Question: {question}"""
 
 async def call_huggingface(question: str, context: str) -> Dict[str, Any]:
     """Call Hugging Face Inference API."""
-    if not Config.HUGGINGFACE_API_KEY:
-        raise Exception("Hugging Face API key not available")
+    if not Config.HUGGINGFACE_API_KEY or Config.HUGGINGFACE_API_KEY == "hf_demo_key_public":
+        # Use a free model that doesn't require API key
+        model_url = "https://api-inference.huggingface.co/models/google/flan-t5-large"
+        headers = {"Content-Type": "application/json"}
+    else:
+        model_url = f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}"
+        headers = {
+            "Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}",
+            "Content-Type": "application/json"
+        }
     
-    prompt = f"Context: {context[:1500]}\n\nQuestion: {question}\n\nAnswer:"
+    # Create a more structured prompt for better results
+    prompt = f"""Based on the following context, answer the question concisely and accurately.
+
+Context: {context[:1500]}
+
+Question: {question}
+
+Answer:"""
 
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}",
-                headers={
-                    "Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}",
-                    "Content-Type": "application/json"
-                },
+                model_url,
+                headers=headers,
                 json={
                     "inputs": prompt,
                     "parameters": {
-                        "max_new_tokens": 200,
-                        "temperature": 0.3,
-                        "do_sample": True
+                        "max_new_tokens": 150,
+                        "temperature": 0.2,
+                        "do_sample": True,
+                        "top_p": 0.9
                     }
                 },
-                timeout=20.0
+                timeout=25.0
             )
             response.raise_for_status()
             
             result = response.json()
+            
+            # Parse response based on model type
             if isinstance(result, list) and len(result) > 0:
-                answer = result[0].get("generated_text", "").replace(prompt, "").strip()
+                if "generated_text" in result[0]:
+                    # For text generation models
+                    full_text = result[0]["generated_text"]
+                    # Extract only the new generated part after the prompt
+                    if prompt in full_text:
+                        answer = full_text.replace(prompt, "").strip()
+                    else:
+                        answer = full_text.strip()
+                else:
+                    # For other model types
+                    answer = str(result[0])
+            elif isinstance(result, dict):
+                if "generated_text" in result:
+                    answer = result["generated_text"].replace(prompt, "").strip()
+                else:
+                    answer = str(result)
             else:
                 answer = str(result)
             
+            # Clean up the answer
+            if not answer or len(answer.strip()) < 3:
+                answer = "Unable to generate a meaningful response from Hugging Face model."
+            
+            # Determine which model was actually used
+            model_used = "google/flan-t5-large" if Config.HUGGINGFACE_API_KEY == "hf_demo_key_public" else Config.HUGGINGFACE_MODEL
+            
             return {
-                "answer": answer,
+                "answer": answer[:500],  # Limit answer length
                 "provider": "huggingface",
-                "model": Config.HUGGINGFACE_MODEL,
+                "model": model_used,
                 "success": True
             }
             

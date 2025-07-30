@@ -1,9 +1,0 @@
-fastapi
-pydantic
-httpx
-uvicorn
-PyPDF2
-sentence-transformers
-numpy
-faiss-cpu
-python-docx
