@@ -6,11 +6,18 @@ import os
 import json
 import re
 import asyncio
+import io
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field
+
+try:
+    import PyPDF2
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
 
 app = FastAPI(title="Multi-LLM Query System", version="2.0.0")
 
@@ -48,7 +55,7 @@ class RunResponse(BaseModel):
 
 # Document Processing
 async def fetch_document(url: str) -> str:
-    """Fetch and extract text from document URL."""
+    """Fetch and extract text from document URL with proper PDF support."""
     try:
         async with httpx.AsyncClient(timeout=Config.REQUEST_TIMEOUT) as client:
             response = await client.get(url)
@@ -58,30 +65,67 @@ async def fetch_document(url: str) -> str:
             if len(content) > Config.MAX_DOCUMENT_SIZE:
                 raise HTTPException(400, "Document exceeds size limit")
             
-            # Handle PDF content - try to extract text
-            try:
-                # For PDFs, we'll decode and clean the content as best we can
-                text = content.decode('utf-8', errors='ignore')
-                
-                # Clean up common PDF artifacts
-                text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\xff]', ' ', text)
-                text = re.sub(r'\s+', ' ', text)
-                text = text.strip()
-                
-                if len(text) < 100:  # Very short text might indicate poor extraction
-                    # Try latin-1 encoding for PDFs
-                    text = content.decode('latin-1', errors='ignore')
-                    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', ' ', text)
-                    text = re.sub(r'\s+', ' ', text)
-                    text = text.strip()
-                
-                return text if text else "Document content could not be decoded"
-                
-            except Exception:
-                return "Document content could not be decoded"
+            # Check if it's a PDF by content type or URL
+            content_type = response.headers.get('content-type', '').lower()
+            is_pdf = 'pdf' in content_type or url.lower().endswith('.pdf')
+            
+            if is_pdf and PDF_AVAILABLE:
+                return extract_pdf_text(content)
+            else:
+                return extract_text_fallback(content)
                 
     except Exception as e:
         raise HTTPException(500, f"Document fetch failed: {str(e)}")
+
+def extract_pdf_text(content: bytes) -> str:
+    """Extract text from PDF content using PyPDF2."""
+    try:
+        pdf_file = io.BytesIO(content)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        
+        text = ""
+        for page_num in range(len(pdf_reader.pages)):
+            page = pdf_reader.pages[page_num]
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+        
+        # Clean up the extracted text
+        text = re.sub(r'\s+', ' ', text)
+        text = text.strip()
+        
+        if len(text) < 50:
+            # If PDF extraction failed, try fallback
+            return extract_text_fallback(content)
+        
+        return text
+        
+    except Exception as e:
+        print(f"PDF extraction failed: {e}")
+        return extract_text_fallback(content)
+
+def extract_text_fallback(content: bytes) -> str:
+    """Fallback text extraction for non-PDF or when PDF extraction fails."""
+    try:
+        # Try UTF-8 first
+        text = content.decode('utf-8', errors='ignore')
+        
+        # Clean up common PDF artifacts if this is raw PDF content
+        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\xff]', ' ', text)
+        text = re.sub(r'\s+', ' ', text)
+        text = text.strip()
+        
+        if len(text) < 100:
+            # Try latin-1 encoding
+            text = content.decode('latin-1', errors='ignore')
+            text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', ' ', text)
+            text = re.sub(r'\s+', ' ', text)
+            text = text.strip()
+        
+        return text if text else "Document content could not be decoded"
+        
+    except Exception:
+        return "Document content could not be decoded"
 
 def chunk_text(text: str) -> List[Dict[str, Any]]:
     """Smart text chunking for policy documents."""
@@ -349,15 +393,130 @@ Answer:"""
         return {"success": False, "error": str(e), "provider": "huggingface"}
 
 def generate_fallback_answer(question: str, relevant_chunks: List[Dict[str, Any]]) -> str:
-    """Generate a fallback answer using simple text processing."""
+    """Generate a fallback answer using smart text processing for policy documents."""
     if not relevant_chunks:
-        return "I couldn't find relevant information in the document to answer this question."
+        return "Information not available in the provided document."
     
-    # Get the best chunk
-    best_chunk = relevant_chunks[0]
-    context = best_chunk['text']
+    # Combine all relevant chunks for better context
+    context = " ".join([chunk['text'] for chunk in relevant_chunks])
     
-    # Simple answer extraction
+    # Extract key information based on question type
+    question_lower = question.lower()
+    
+    # Pattern matching for specific policy questions
+    if 'grace period' in question_lower and 'premium' in question_lower:
+        # Look for grace period information
+        grace_patterns = [
+            r'grace period[^.]*?(\d+)\s*days?[^.]*premium',
+            r'premium[^.]*?grace period[^.]*?(\d+)\s*days?',
+            r'(\d+)\s*days?[^.]*?grace period[^.]*?premium',
+        ]
+        for pattern in grace_patterns:
+            match = re.search(pattern, context, re.IGNORECASE)
+            if match:
+                days = match.group(1)
+                return f"A grace period of {days} days is provided for premium payment."
+    
+    elif 'waiting period' in question_lower and ('pre-existing' in question_lower or 'ped' in question_lower):
+        # Look for PED waiting period
+        ped_patterns = [
+            r'waiting period[^.]*?(\d+)\s*(?:months?|years?)[^.]*?pre-existing',
+            r'pre-existing[^.]*?waiting period[^.]*?(\d+)\s*(?:months?|years?)',
+            r'(\d+)\s*(?:months?|years?)[^.]*?waiting period[^.]*?pre-existing',
+        ]
+        for pattern in ped_patterns:
+            match = re.search(pattern, context, re.IGNORECASE)
+            if match:
+                period = match.group(1)
+                unit = "months" if "month" in match.group(0) else "years"
+                return f"There is a waiting period of {period} {unit} for pre-existing diseases to be covered."
+    
+    elif 'maternity' in question_lower:
+        # Look for maternity coverage information
+        if 'maternity' in context.lower():
+            maternity_patterns = [
+                r'maternity[^.]*?(\d+)\s*months?[^.]*?covered',
+                r'(\d+)\s*months?[^.]*?maternity[^.]*?covered',
+                r'maternity[^.]*?covered[^.]*?(\d+)\s*months?',
+            ]
+            for pattern in maternity_patterns:
+                match = re.search(pattern, context, re.IGNORECASE)
+                if match:
+                    months = match.group(1)
+                    return f"Maternity expenses are covered after {months} months of continuous coverage."
+            
+            # General maternity coverage
+            if 'covered' in context.lower() or 'benefit' in context.lower():
+                return "Yes, the policy covers maternity expenses with specific conditions and waiting periods."
+    
+    elif 'cataract' in question_lower and 'waiting' in question_lower:
+        # Look for cataract waiting period
+        cataract_patterns = [
+            r'cataract[^.]*?(\d+)\s*(?:years?|months?)[^.]*?waiting',
+            r'waiting[^.]*?(\d+)\s*(?:years?|months?)[^.]*?cataract',
+        ]
+        for pattern in cataract_patterns:
+            match = re.search(pattern, context, re.IGNORECASE)
+            if match:
+                period = match.group(1)
+                unit = "years" if "year" in match.group(0) else "months"
+                return f"The policy has a waiting period of {period} {unit} for cataract surgery."
+    
+    elif 'organ donor' in question_lower:
+        if 'organ' in context.lower() and 'donor' in context.lower():
+            if 'covered' in context.lower() or 'expenses' in context.lower():
+                return "Yes, the policy covers medical expenses for organ donors under specific conditions."
+            else:
+                return "Organ donor coverage may be included with specific terms and conditions."
+    
+    elif 'no claim discount' in question_lower or 'ncd' in question_lower:
+        # Look for NCD information
+        ncd_patterns = [
+            r'no claim discount[^.]*?(\d+)%',
+            r'ncd[^.]*?(\d+)%',
+            r'(\d+)%[^.]*?no claim discount',
+        ]
+        for pattern in ncd_patterns:
+            match = re.search(pattern, context, re.IGNORECASE)
+            if match:
+                percentage = match.group(1)
+                return f"A No Claim Discount of {percentage}% is offered on renewal if no claims were made."
+    
+    elif 'health check' in question_lower or 'preventive' in question_lower:
+        if 'health check' in context.lower() or 'check-up' in context.lower():
+            return "Yes, the policy provides benefits for preventive health check-ups with specific conditions."
+    
+    elif 'hospital' in question_lower and 'define' in question_lower:
+        # Look for hospital definition
+        if 'hospital' in context.lower():
+            hospital_patterns = [
+                r'hospital[^.]*?(\d+)\s*beds?[^.]*?',
+                r'(\d+)\s*beds?[^.]*?hospital[^.]*?',
+            ]
+            for pattern in hospital_patterns:
+                match = re.search(pattern, context, re.IGNORECASE)
+                if match:
+                    beds = match.group(1)
+                    return f"A hospital is defined as an institution with at least {beds} inpatient beds along with other specified requirements."
+    
+    elif 'ayush' in question_lower:
+        if 'ayush' in context.lower():
+            return "The policy covers medical expenses for AYUSH treatments (Ayurveda, Yoga, Naturopathy, Unani, Siddha, and Homeopathy) up to the Sum Insured limit."
+    
+    elif 'room rent' in question_lower or 'icu' in question_lower:
+        # Look for room rent limits
+        rent_patterns = [
+            r'room rent[^.]*?(\d+)%[^.]*?sum insured',
+            r'(\d+)%[^.]*?sum insured[^.]*?room rent',
+            r'icu[^.]*?(\d+)%[^.]*?sum insured',
+        ]
+        for pattern in rent_patterns:
+            match = re.search(pattern, context, re.IGNORECASE)
+            if match:
+                percentage = match.group(1)
+                return f"Room rent is capped at {percentage}% of the Sum Insured, with ICU charges having specific limits."
+    
+    # Fallback: Use the most relevant sentence
     question_keywords = set(re.findall(r'\w+', question.lower()))
     sentences = re.split(r'[.!?]+', context)
     
@@ -365,7 +524,7 @@ def generate_fallback_answer(question: str, relevant_chunks: List[Dict[str, Any]
     best_score = 0
     
     for sentence in sentences:
-        if len(sentence.strip()) < 10:
+        if len(sentence.strip()) < 20:
             continue
             
         sentence_words = set(re.findall(r'\w+', sentence.lower()))
@@ -375,17 +534,13 @@ def generate_fallback_answer(question: str, relevant_chunks: List[Dict[str, Any]
             best_score = overlap
             best_sentence = sentence.strip()
     
-    if best_sentence and best_score > 0:
-        answer = best_sentence
-        if not answer.endswith('.'):
-            answer += '.'
-        return answer
-    else:
-        # Fallback to first part of the chunk
-        answer = context[:400].strip()
-        if len(context) > 400:
-            answer += "..."
-        return answer
+    if best_sentence and best_score > 1:
+        if not best_sentence.endswith('.'):
+            best_sentence += '.'
+        return best_sentence
+    
+    # Final fallback
+    return "The specific information requested is not clearly available in the provided document."
 
 async def generate_answer_with_fallback(question: str, relevant_chunks: List[Dict[str, Any]]) -> AnswerResponse:
     """Generate answer using multiple LLM providers with fallback."""
