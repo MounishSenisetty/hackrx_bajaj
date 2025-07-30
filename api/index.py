@@ -1,5 +1,5 @@
 """
-Document Query System with LangChain Integration
+Simplified Document Query System for Vercel Deployment
 """
 
 import os
@@ -20,31 +20,6 @@ try:
 except ImportError:
     PDF_AVAILABLE = False
 
-# LangChain imports
-try:
-    from langchain.text_splitter import RecursiveCharacterTextSplitter
-    from langchain.document_loaders import PyPDFLoader
-    from langchain.schema import Document
-    from langchain.vectorstores import FAISS
-    from langchain.embeddings import HuggingFaceEmbeddings
-    from langchain.llms import OpenAI
-    from langchain.chat_models import ChatOpenAI, ChatAnthropic
-    from langchain.chains import RetrievalQA
-    from langchain.prompts import PromptTemplate
-    from langchain.schema.runnable import RunnablePassthrough
-    from langchain.schema.output_parser import StrOutputParser
-    LANGCHAIN_AVAILABLE = True
-except ImportError:
-    # Fallback imports for when LangChain is not available
-    try:
-        from sentence_transformers import SentenceTransformer
-        import faiss
-        import numpy as np
-        VECTOR_DB_AVAILABLE = True
-    except ImportError:
-        VECTOR_DB_AVAILABLE = False
-    LANGCHAIN_AVAILABLE = False
-
 app = FastAPI(title="Document Query System", version="4.0.0")
 
 # Configuration
@@ -59,145 +34,15 @@ class Config:
     # LLM Models and endpoints
     OPENAI_MODEL = "gpt-3.5-turbo"
     ANTHROPIC_MODEL = "claude-3-haiku-20240307"
-    HUGGINGFACE_MODEL = "mistralai/Mixtral-8x7B-Instruct-v0.1"
+    HUGGINGFACE_MODEL = "google/flan-t5-large"
     
-    # Vector Database Configuration
-    EMBEDDING_MODEL = "all-MiniLM-L6-v2"  # Lightweight and fast
-    CHUNK_SIZE = 256  # Smaller chunks for better precision
-    CHUNK_OVERLAP = 32  # Reduced overlap
-    MAX_RELEVANT_CHUNKS = 3  # Fewer but more relevant chunks
-    SIMILARITY_THRESHOLD = 0.2  # Lower threshold for more results
+    # Processing Configuration
+    CHUNK_SIZE = 1000  # Characters for simple chunking
+    CHUNK_OVERLAP = 200
+    MAX_CHUNKS = 5
     
     REQUEST_TIMEOUT = 30.0
-    MAX_DOCUMENT_SIZE = 50 * 1024 * 1024  # Increased to 50MB for large documents
-
-# LangChain-based Document Processing
-class LangChainDocumentProcessor:
-    """LangChain-powered document processing with vector search capabilities."""
-    
-    def __init__(self):
-        global LANGCHAIN_AVAILABLE
-        self.vectorstore = None
-        self.text_splitter = None
-        self.embeddings = None
-        self.llm_chain = None
-        
-        if LANGCHAIN_AVAILABLE:
-            try:
-                # Initialize text splitter for optimal chunking
-                self.text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=Config.CHUNK_SIZE,
-                    chunk_overlap=Config.CHUNK_OVERLAP,
-                    length_function=len,
-                    separators=["\n\n", "\n", ".", "!", "?", ";", ":", " ", ""]
-                )
-                
-                # Initialize embeddings
-                self.embeddings = HuggingFaceEmbeddings(
-                    model_name=Config.EMBEDDING_MODEL,
-                    model_kwargs={'device': 'cpu'},
-                    encode_kwargs={'normalize_embeddings': True}
-                )
-                
-                print("LangChain document processor initialized successfully")
-                
-            except Exception as e:
-                print(f"Failed to initialize LangChain components: {e}")
-                LANGCHAIN_AVAILABLE = False
-    
-    async def process_document(self, text: str) -> List[Document]:
-        """Process document text into LangChain Document objects."""
-        if not LANGCHAIN_AVAILABLE or not self.text_splitter:
-            # Fallback to simple chunking
-            return self._simple_document_chunking(text)
-        
-        try:
-            # Create documents using LangChain text splitter
-            documents = self.text_splitter.create_documents([text])
-            
-            # Add metadata to documents
-            for i, doc in enumerate(documents):
-                doc.metadata.update({
-                    'chunk_id': i,
-                    'total_chunks': len(documents),
-                    'chunk_size': len(doc.page_content),
-                    'processing_method': 'langchain_recursive'
-                })
-            
-            return documents
-            
-        except Exception as e:
-            print(f"LangChain document processing failed: {e}")
-            return self._simple_document_chunking(text)
-    
-    def _simple_document_chunking(self, text: str) -> List[Document]:
-        """Fallback chunking when LangChain is not available."""
-        chunk_size = Config.CHUNK_SIZE * 4  # Convert to characters
-        chunks = []
-        
-        for i in range(0, len(text), chunk_size):
-            chunk_text = text[i:i + chunk_size]
-            doc = Document(
-                page_content=chunk_text,
-                metadata={
-                    'chunk_id': len(chunks),
-                    'start_char': i,
-                    'end_char': i + len(chunk_text),
-                    'processing_method': 'simple_fallback'
-                }
-            )
-            chunks.append(doc)
-        
-        return chunks
-    
-    async def create_vectorstore(self, documents: List[Document]) -> bool:
-        """Create FAISS vectorstore from documents."""
-        if not LANGCHAIN_AVAILABLE or not self.embeddings:
-            return False
-        
-        try:
-            # Create FAISS vectorstore
-            self.vectorstore = FAISS.from_documents(
-                documents=documents,
-                embedding=self.embeddings
-            )
-            
-            print(f"Created FAISS vectorstore with {len(documents)} documents")
-            return True
-            
-        except Exception as e:
-            print(f"Failed to create vectorstore: {e}")
-            return False
-    
-    async def similarity_search(self, query: str, k: int = Config.MAX_RELEVANT_CHUNKS) -> List[Dict[str, Any]]:
-        """Perform similarity search using LangChain FAISS vectorstore."""
-        if not self.vectorstore:
-            return []
-        
-        try:
-            # Use LangChain's similarity search with scores
-            docs_with_scores = self.vectorstore.similarity_search_with_score(
-                query=query,
-                k=k
-            )
-            
-            # Convert to our expected format
-            results = []
-            for doc, score in docs_with_scores:
-                result = {
-                    'text': doc.page_content,
-                    'score': float(1 - score),  # Convert distance to similarity
-                    'metadata': doc.metadata.copy()
-                }
-                result['metadata']['search_type'] = 'langchain_faiss'
-                result['metadata']['similarity_score'] = float(score)
-                results.append(result)
-            
-            return results
-            
-        except Exception as e:
-            print(f"LangChain similarity search failed: {e}")
-            return []
+    MAX_DOCUMENT_SIZE = 10 * 1024 * 1024  # 10MB limit for Vercel
 
 # Request/Response Models
 class RunRequest(BaseModel):
@@ -281,504 +126,79 @@ def extract_text_fallback(content: bytes) -> str:
     except Exception:
         return "Document content could not be decoded"
 
-def chunk_text_for_embeddings(text: str) -> List[Dict[str, Any]]:
-    """Optimized text chunking for vector embeddings."""
-    chunk_size = Config.CHUNK_SIZE  # Tokens, not characters
-    overlap = Config.CHUNK_OVERLAP
+def simple_chunk_text(text: str) -> List[str]:
+    """Simple text chunking for processing."""
+    if len(text) <= Config.CHUNK_SIZE:
+        return [text]
+    
     chunks = []
+    start = 0
     
-    # Clean the text first
-    text = re.sub(r'\s+', ' ', text)
-    text = text.strip()
-    
-    # Estimate tokens (rough approximation: 1 token ≈ 4 characters)
-    estimated_tokens = len(text) // 4
-    
-    if estimated_tokens < chunk_size:
-        # If document is small, return as single chunk
-        return [{
-            'text': text,
-            'chunk_id': 0,
-            'start_char': 0,
-            'end_char': len(text),
-            'metadata': {'type': 'full_document', 'tokens': estimated_tokens}
-        }]
-    
-    # Strategy 1: Try semantic chunking (paragraphs/sections)
-    # Look for natural break points
-    break_patterns = [
-        r'\n\s*(?:Chapter|Section|Part|Article|§)\s*\d+',  # Formal sections
-        r'\n\s*\d+\.\s+[A-Z]',  # Numbered items
-        r'\n\s*[A-Z][A-Z\s]{15,}\s*\n',  # Headers
-        r'\n\s*\n\s*[A-Z]'  # Paragraph breaks
-    ]
-    
-    # Find break points
-    break_points = [0]
-    for pattern in break_patterns:
-        matches = list(re.finditer(pattern, text, re.IGNORECASE))
-        break_points.extend([match.start() for match in matches])
-    
-    break_points.append(len(text))
-    break_points = sorted(set(break_points))
-    
-    # Create chunks based on break points
-    for i in range(len(break_points) - 1):
-        start = break_points[i]
-        end = break_points[i + 1]
-        section_text = text[start:end].strip()
+    while start < len(text):
+        end = start + Config.CHUNK_SIZE
         
-        if not section_text:
-            continue
+        # Try to end at sentence boundary
+        if end < len(text):
+            # Look for sentence endings within overlap distance
+            for i in range(end, max(start + Config.CHUNK_SIZE - Config.CHUNK_OVERLAP, end - 200), -1):
+                if text[i] in '.!?':
+                    end = i + 1
+                    break
         
-        # If section is too large, split it further
-        if len(section_text) > chunk_size * 4:  # Convert tokens to chars
-            # Split by sentences
-            sentences = re.split(r'[.!?]+', section_text)
-            current_chunk = ""
-            chunk_start = start
-            
-            for sentence in sentences:
-                sentence = sentence.strip()
-                if not sentence:
-                    continue
-                
-                # Check if adding this sentence exceeds chunk size
-                test_chunk = current_chunk + ". " + sentence if current_chunk else sentence
-                if len(test_chunk) > chunk_size * 4 and current_chunk:
-                    # Save current chunk
-                    chunks.append({
-                        'text': current_chunk.strip(),
-                        'chunk_id': len(chunks),
-                        'start_char': chunk_start,
-                        'end_char': chunk_start + len(current_chunk),
-                        'metadata': {
-                            'type': 'sentence_split',
-                            'tokens': len(current_chunk) // 4,
-                            'section': i
-                        }
-                    })
-                    
-                    # Start new chunk with overlap
-                    if len(current_chunk) > overlap * 4:
-                        overlap_text = current_chunk[-(overlap * 4):]
-                        current_chunk = overlap_text + ". " + sentence
-                        chunk_start = chunk_start + len(current_chunk) - len(overlap_text)
-                    else:
-                        current_chunk = sentence
-                        chunk_start = start + section_text.find(sentence)
-                else:
-                    current_chunk = test_chunk
-            
-            # Add final chunk from this section
-            if current_chunk.strip():
-                chunks.append({
-                    'text': current_chunk.strip(),
-                    'chunk_id': len(chunks),
-                    'start_char': chunk_start,
-                    'end_char': chunk_start + len(current_chunk),
-                    'metadata': {
-                        'type': 'sentence_split',
-                        'tokens': len(current_chunk) // 4,
-                        'section': i
-                    }
-                })
-        else:
-            # Section is small enough, use as chunk
-            chunks.append({
-                'text': section_text,
-                'chunk_id': len(chunks),
-                'start_char': start,
-                'end_char': end,
-                'metadata': {
-                    'type': 'semantic_section',
-                    'tokens': len(section_text) // 4,
-                    'section': i
-                }
-            })
-    
-    # If we didn't get good chunks, fall back to sliding window
-    if len(chunks) < 2:
-        chunks = []
-        chunk_size_chars = chunk_size * 4
-        overlap_chars = overlap * 4
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
         
-        for i in range(0, len(text), chunk_size_chars - overlap_chars):
-            chunk_text = text[i:i + chunk_size_chars]
-            
-            # Try to end at sentence boundary
-            if i + chunk_size_chars < len(text):
-                last_period = chunk_text.rfind('.')
-                last_exclaim = chunk_text.rfind('!')
-                last_question = chunk_text.rfind('?')
-                last_sentence_end = max(last_period, last_exclaim, last_question)
-                
-                if last_sentence_end > len(chunk_text) * 0.8:  # If we can cut at least 80% through
-                    chunk_text = chunk_text[:last_sentence_end + 1]
-            
-            chunks.append({
-                'text': chunk_text.strip(),
-                'chunk_id': len(chunks),
-                'start_char': i,
-                'end_char': i + len(chunk_text),
-                'metadata': {
-                    'type': 'sliding_window',
-                    'tokens': len(chunk_text) // 4,
-                    'window': i // (chunk_size_chars - overlap_chars)
-                }
-            })
-    
-    # Remove empty chunks and very small chunks
-    chunks = [chunk for chunk in chunks if len(chunk['text'].strip()) > 50]
-    
-    # Re-number chunk IDs
-    for i, chunk in enumerate(chunks):
-        chunk['chunk_id'] = i
+        start = end - Config.CHUNK_OVERLAP
+        
+        if len(chunks) >= Config.MAX_CHUNKS:
+            break
     
     return chunks
 
-def simple_search(query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Enhanced keyword-based search for any document type."""
-    query_words = set(re.findall(r'\w+', query.lower()))
+def simple_search(question: str, chunks: List[str]) -> List[str]:
+    """Simple keyword-based search to find relevant chunks."""
+    question_words = set(re.findall(r'\w+', question.lower()))
     scored_chunks = []
     
-    # Generic keywords that indicate important information across document types
-    important_keywords = {
-        # Financial/Business terms
-        'cost', 'price', 'fee', 'amount', 'payment', 'revenue', 'profit', 'budget',
-        # Time-related terms
-        'date', 'deadline', 'period', 'duration', 'time', 'schedule', 'term',
-        # Process/Action terms
-        'process', 'procedure', 'method', 'steps', 'requirements', 'conditions',
-        # Legal/Compliance terms
-        'policy', 'regulation', 'compliance', 'requirement', 'obligation', 'right',
-        # Quantitative terms
-        'percentage', 'rate', 'ratio', 'limit', 'maximum', 'minimum', 'threshold',
-        # Status/State terms
-        'available', 'eligible', 'covered', 'included', 'excluded', 'applicable',
-        # Common document sections
-        'overview', 'summary', 'details', 'specification', 'description', 'definition'
-    }
-    
     for chunk in chunks:
-        chunk_text_lower = chunk['text'].lower()
-        chunk_words = set(re.findall(r'\w+', chunk_text_lower))
+        chunk_words = set(re.findall(r'\w+', chunk.lower()))
+        overlap = len(question_words.intersection(chunk_words))
         
-        # Basic keyword overlap score
-        overlap = len(query_words.intersection(chunk_words))
-        base_score = overlap / len(query_words) if query_words else 0
-        
-        # Boost score for important keywords
-        keyword_boost = 0
-        for keyword in important_keywords:
-            if keyword in chunk_text_lower:
-                keyword_boost += 0.05  # Smaller boost for generic terms
-        
-        # Boost score for exact phrase matches
-        phrase_boost = 0
-        query_text = query.lower()
-        if len(query_text) > 10 and query_text in chunk_text_lower:
-            phrase_boost = 0.4
-        
-        # Boost for partial phrase matches (2+ consecutive words)
-        query_parts = query_text.split()
-        if len(query_parts) >= 2:
-            for i in range(len(query_parts) - 1):
-                phrase = ' '.join(query_parts[i:i+2])
-                if phrase in chunk_text_lower:
-                    phrase_boost += 0.2
-        
-        # Boost for numerical content if query contains numbers
-        number_boost = 0
-        if re.search(r'\d+', query) and re.search(r'\d+', chunk['text']):
-            number_boost = 0.1
-        
-        # Boost for definition-style content
-        definition_boost = 0
-        if any(word in query.lower() for word in ['what is', 'define', 'definition', 'meaning']):
-            if any(pattern in chunk_text_lower for pattern in ['means', 'defined as', 'refers to', ':']):
-                definition_boost = 0.3
-        
-        # Penalize very short or very long chunks
-        length_penalty = 0
-        chunk_length = len(chunk['text'])
-        if chunk_length < 50:
-            length_penalty = -0.2
-        elif chunk_length > 2000:
-            length_penalty = -0.1
-        
-        # Calculate final score
-        final_score = base_score + keyword_boost + phrase_boost + number_boost + definition_boost + length_penalty
-        
-        if final_score > 0 or overlap > 0:
-            # Create result in consistent format
-            chunk_copy = chunk.copy()
-            chunk_copy['score'] = final_score
-            chunk_copy['metadata'] = chunk_copy.get('metadata', {})
-            chunk_copy['metadata']['search_type'] = 'keyword'
-            scored_chunks.append(chunk_copy)
+        if overlap > 0:
+            score = overlap / len(question_words)
+            
+            # Boost for exact phrases
+            if len(question) > 10 and question.lower() in chunk.lower():
+                score += 0.5
+            
+            # Boost for numbers if question contains numbers
+            if re.search(r'\d+', question) and re.search(r'\d+', chunk):
+                score += 0.2
+            
+            scored_chunks.append((score, chunk))
     
-    # Sort by score and return top 5 for better context
-    scored_chunks.sort(key=lambda x: x['score'], reverse=True)
-    return scored_chunks[:5]
+    # Sort by score and return top chunks
+    scored_chunks.sort(reverse=True)
+    return [chunk for score, chunk in scored_chunks[:3]]
 
-
-async def langchain_vector_search(text: str, queries: List[str]) -> List[Dict[str, Any]]:
-    """
-    LangChain-powered document search with advanced vector capabilities.
-    """
-    if not LANGCHAIN_AVAILABLE:
-        print("LangChain not available, falling back to simple search")
-        return await fallback_vector_search(text, queries)
-    
-    try:
-        # Initialize LangChain processor
-        processor = LangChainDocumentProcessor()
-        
-        # Process document into LangChain documents
-        documents = await processor.process_document(text)
-        
-        if not documents:
-            print("No documents created, falling back")
-            return await fallback_vector_search(text, queries)
-        
-        # Create vectorstore
-        vectorstore_created = await processor.create_vectorstore(documents)
-        
-        if not vectorstore_created or not processor.vectorstore:
-            print("Vectorstore creation failed, falling back")
-            return await fallback_vector_search(text, queries)
-        
-        # Perform similarity search for all queries
-        all_results = []
-        for query in queries:
-            results = await processor.similarity_search(query, k=Config.MAX_RELEVANT_CHUNKS * 2)
-            
-            # Enhance results with query-specific scoring
-            for result in results:
-                result['metadata']['query'] = query
-                result['metadata']['enhanced_langchain'] = True
-                
-                # Boost score for exact keyword matches
-                query_words = set(query.lower().split())
-                text_words = set(result['text'].lower().split())
-                keyword_overlap = len(query_words.intersection(text_words))
-                
-                if keyword_overlap > 0:
-                    keyword_boost = (keyword_overlap / len(query_words)) * 0.2
-                    result['score'] = min(1.0, result['score'] + keyword_boost)
-            
-            all_results.extend(results)
-        
-        # Remove duplicates and sort by relevance
-        unique_results = {}
-        for result in all_results:
-            chunk_id = result['metadata'].get('chunk_id', 0)
-            if chunk_id in unique_results:
-                if result['score'] > unique_results[chunk_id]['score']:
-                    unique_results[chunk_id] = result
-            else:
-                unique_results[chunk_id] = result
-        
-        final_results = list(unique_results.values())
-        final_results.sort(key=lambda x: x['score'], reverse=True)
-        
-        print(f"LangChain vector search returned {len(final_results)} results")
-        return final_results[:Config.MAX_RELEVANT_CHUNKS * 2]
-        
-    except Exception as e:
-        print(f"LangChain vector search failed: {e}")
-        return await fallback_vector_search(text, queries)
-
-async def fallback_vector_search(text: str, queries: List[str]) -> List[Dict[str, Any]]:
-    """Fallback search when LangChain is not available."""
-    if VECTOR_DB_AVAILABLE:
-        try:
-            # Use original FAISS implementation as fallback
-            from sentence_transformers import SentenceTransformer
-            import faiss
-            import numpy as np
-            
-            # Simple implementation
-            chunks = chunk_text_for_embeddings(text)
-            if not chunks:
-                return []
-            
-            # Initialize embedding model
-            embedding_model = SentenceTransformer(Config.EMBEDDING_MODEL)
-            
-            # Generate embeddings
-            texts = [chunk['text'] for chunk in chunks]
-            embeddings = embedding_model.encode(texts, convert_to_numpy=True)
-            
-            # Normalize embeddings
-            faiss.normalize_L2(embeddings)
-            
-            # Create FAISS index
-            index = faiss.IndexFlatIP(embeddings.shape[1])
-            index.add(embeddings.astype('float32'))
-            
-            # Search for each query
-            all_results = []
-            for query in queries:
-                query_embedding = embedding_model.encode([query], convert_to_numpy=True)
-                faiss.normalize_L2(query_embedding)
-                
-                scores, indices = index.search(query_embedding.astype('float32'), min(5, len(chunks)))
-                
-                for score, idx in zip(scores[0], indices[0]):
-                    if idx >= 0 and score >= Config.SIMILARITY_THRESHOLD:
-                        result = chunks[idx].copy()
-                        result['score'] = float(score)
-                        result['metadata']['search_type'] = 'fallback_faiss'
-                        all_results.append(result)
-            
-            # Sort and return results
-            all_results.sort(key=lambda x: x['score'], reverse=True)
-            return all_results[:Config.MAX_RELEVANT_CHUNKS]
-            
-        except Exception as e:
-            print(f"Fallback vector search failed: {e}")
-    
-    # Final fallback to simple keyword search
-    chunks = chunk_text_for_embeddings(text)
-    return simple_search(" ".join(queries), chunks)
-
-
-class LangChainLLMProvider:
-    """LangChain-based LLM provider with multiple model support."""
-    
-    def __init__(self):
-        self.openai_llm = None
-        self.anthropic_llm = None
-        self.retrieval_qa_chain = None
-        
-        # Initialize LangChain LLMs
-        if LANGCHAIN_AVAILABLE:
-            try:
-                if Config.OPENAI_API_KEY:
-                    self.openai_llm = ChatOpenAI(
-                        api_key=Config.OPENAI_API_KEY,
-                        model_name=Config.OPENAI_MODEL,
-                        temperature=0.1,
-                        max_tokens=150
-                    )
-                
-                if Config.ANTHROPIC_API_KEY:
-                    self.anthropic_llm = ChatAnthropic(
-                        api_key=Config.ANTHROPIC_API_KEY,
-                        model=Config.ANTHROPIC_MODEL,
-                        temperature=0.1,
-                        max_tokens=150
-                    )
-                
-                print("LangChain LLM providers initialized")
-                
-            except Exception as e:
-                print(f"Failed to initialize LangChain LLMs: {e}")
-    
-    def create_qa_chain(self, vectorstore):
-        """Create a RetrievalQA chain using the vectorstore."""
-        if not LANGCHAIN_AVAILABLE or not vectorstore:
-            return None
-        
-        try:
-            # Create retriever from vectorstore
-            retriever = vectorstore.as_retriever(
-                search_type="similarity",
-                search_kwargs={"k": Config.MAX_RELEVANT_CHUNKS}
-            )
-            
-            # Create custom prompt template
-            prompt_template = """You are an expert document analyst. Use the following document context to answer the question precisely.
-
-Context: {context}
-
-Question: {question}
-
-Instructions:
-- Extract the exact answer from the provided context
-- Use specific numbers, dates, and terms as they appear in the document
-- Provide a clear, factual response
-- If the information is not in the context, state that clearly
-
-Answer:"""
-            
-            PROMPT = PromptTemplate(
-                template=prompt_template,
-                input_variables=["context", "question"]
-            )
-            
-            # Use the best available LLM
-            llm = self.openai_llm or self.anthropic_llm
-            if not llm:
-                return None
-            
-            # Create RetrievalQA chain
-            qa_chain = RetrievalQA.from_chain_type(
-                llm=llm,
-                chain_type="stuff",
-                retriever=retriever,
-                chain_type_kwargs={"prompt": PROMPT},
-                return_source_documents=True
-            )
-            
-            return qa_chain
-            
-        except Exception as e:
-            print(f"Failed to create QA chain: {e}")
-            return None
-    
-    async def query_with_langchain(self, question: str, vectorstore) -> Dict[str, Any]:
-        """Query using LangChain RetrievalQA chain."""
-        if not LANGCHAIN_AVAILABLE:
-            raise Exception("LangChain not available")
-        
-        try:
-            # Create QA chain if not exists
-            if not self.retrieval_qa_chain:
-                self.retrieval_qa_chain = self.create_qa_chain(vectorstore)
-            
-            if not self.retrieval_qa_chain:
-                raise Exception("Could not create QA chain")
-            
-            # Run the chain
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, 
-                lambda: self.retrieval_qa_chain({"query": question})
-            )
-            
-            answer = result.get("result", "").strip()
-            provider_used = "openai" if self.openai_llm else "anthropic"
-            
-            return {
-                "answer": answer,
-                "provider": f"langchain_{provider_used}",
-                "model": Config.OPENAI_MODEL if self.openai_llm else Config.ANTHROPIC_MODEL,
-                "success": True
-            }
-            
-        except Exception as e:
-            return {"success": False, "error": str(e), "provider": "langchain"}
 async def call_openai(question: str, context: str) -> Dict[str, Any]:
-    """Call OpenAI GPT API for intelligent answer extraction from document context."""
+    """Call OpenAI GPT API for intelligent answer extraction."""
     if not Config.OPENAI_API_KEY:
         raise Exception("OpenAI API key not available")
 
-    prompt = f"""You are an expert document analyst. Extract the precise answer to the question from the provided document context.
+    prompt = f"""Extract the precise answer to the question from the document context.
 
-DOCUMENT CONTEXT:
-{context[:4000]}
+CONTEXT:
+{context[:3000]}
 
 QUESTION: {question}
 
 INSTRUCTIONS:
-- Read the document context carefully
-- Find the specific information that directly answers the question
-- Extract the exact answer as it appears in the document
-- Provide a clear, factual one-sentence response
-- Use the exact numbers, time periods, and terms from the document
-- If the information is not in the context, state that clearly
+- Find the specific information that answers the question
+- Use exact numbers, dates, and terms from the document
+- Provide a clear, factual response
+- If not found, state that clearly
 
 ANSWER:"""
 
@@ -803,35 +223,28 @@ ANSWER:"""
             result = response.json()
             answer = result["choices"][0]["message"]["content"].strip()
             
-            return {
-                "answer": answer,
-                "provider": "openai",
-                "model": Config.OPENAI_MODEL,
-                "success": True
-            }
+            return {"answer": answer, "success": True}
             
     except Exception as e:
-        return {"success": False, "error": str(e), "provider": "openai"}
+        return {"success": False, "error": str(e)}
 
 async def call_anthropic(question: str, context: str) -> Dict[str, Any]:
-    """Call Anthropic Claude API for intelligent answer extraction from document context."""
+    """Call Anthropic Claude API for intelligent answer extraction."""
     if not Config.ANTHROPIC_API_KEY:
         raise Exception("Anthropic API key not available")
     
-    prompt = f"""You are an expert document analyst. Extract the precise answer to the question from the provided document context.
+    prompt = f"""Extract the precise answer to the question from the document context.
 
-DOCUMENT CONTEXT:
-{context[:4000]}
+CONTEXT:
+{context[:3000]}
 
 QUESTION: {question}
 
 INSTRUCTIONS:
-- Read the document context carefully
-- Find the specific information that directly answers the question
-- Extract the exact answer as it appears in the document
-- Provide a clear, factual one-sentence response
-- Use the exact numbers, time periods, and terms from the document
-- If the information is not in the context, state that clearly
+- Find the specific information that answers the question
+- Use exact numbers, dates, and terms from the document
+- Provide a clear, factual response
+- If not found, state that clearly
 
 ANSWER:"""
 
@@ -856,58 +269,26 @@ ANSWER:"""
             result = response.json()
             answer = result["content"][0]["text"].strip()
             
-            return {
-                "answer": answer,
-                "provider": "anthropic",
-                "model": Config.ANTHROPIC_MODEL,
-                "success": True
-            }
+            return {"answer": answer, "success": True}
             
     except Exception as e:
-        return {"success": False, "error": str(e), "provider": "anthropic"}
+        return {"success": False, "error": str(e)}
 
 async def call_huggingface(question: str, context: str) -> Dict[str, Any]:
-    """Call Hugging Face Inference API for precise one-sentence answers."""
-    if not Config.HUGGINGFACE_API_KEY or Config.HUGGINGFACE_API_KEY == "hf_demo_key_public":
-        # Use a free model that doesn't require API key
-        model_url = "https://api-inference.huggingface.co/models/google/flan-t5-large"
-        headers = {"Content-Type": "application/json"}
-    else:
-        model_url = f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}"
-        headers = {
-            "Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}",
-            "Content-Type": "application/json"
-        }
-    
-    # Create a natural prompt for document analysis
-    prompt = f"""You are an expert document analyst. Extract the precise answer to the question from the provided document context.
-
-DOCUMENT CONTEXT:
-{context[:3000]}
-
-QUESTION: {question}
-
-INSTRUCTIONS:
-- Read the document context carefully
-- Find the specific information that directly answers the question
-- Extract the exact answer as it appears in the document
-- Provide a clear, factual response
-- Use the exact numbers, time periods, and terms from the document
-
-ANSWER:"""
-
+    """Call Hugging Face API for answer extraction."""
     try:
+        prompt = f"Question: {question}\n\nContext: {context[:2000]}\n\nAnswer:"
+        
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                model_url,
-                headers=headers,
+                f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}",
+                headers={"Content-Type": "application/json"},
                 json={
                     "inputs": prompt,
                     "parameters": {
-                        "max_new_tokens": 50,  # Limit for one sentence
-                        "temperature": 0.1,   # Lower temperature for factual responses
-                        "do_sample": True,
-                        "top_p": 0.8
+                        "max_new_tokens": 100,
+                        "temperature": 0.1,
+                        "return_full_text": False
                     }
                 },
                 timeout=25.0
@@ -916,259 +297,113 @@ ANSWER:"""
             
             result = response.json()
             
-            # Parse response based on model type
             if isinstance(result, list) and len(result) > 0:
-                if "generated_text" in result[0]:
-                    # For text generation models
-                    full_text = result[0]["generated_text"]
-                    # Extract only the new generated part after the prompt
-                    if prompt in full_text:
-                        answer = full_text.replace(prompt, "").strip()
-                    else:
-                        answer = full_text.strip()
-                else:
-                    # For other model types
-                    answer = str(result[0])
-            elif isinstance(result, dict):
-                if "generated_text" in result:
-                    answer = result["generated_text"].replace(prompt, "").strip()
-                else:
-                    answer = str(result)
+                answer = result[0].get("generated_text", "").strip()
             else:
-                answer = str(result)
+                answer = str(result).strip()
             
-            # Clean up the answer and ensure it's one sentence
-            if answer:
-                # Take only the first sentence
-                sentences = re.split(r'[.!?]+', answer)
-                if sentences and len(sentences[0].strip()) > 10:
-                    answer = sentences[0].strip()
-                    if not answer.endswith('.'):
-                        answer += '.'
-                else:
-                    answer = "Unable to generate a meaningful response from Hugging Face model."
+            if answer and len(answer) > 10:
+                return {"answer": answer[:200], "success": True}
             else:
-                answer = "Unable to generate a meaningful response from Hugging Face model."
-            
-            # Determine which model was actually used
-            model_used = "google/flan-t5-large" if Config.HUGGINGFACE_API_KEY == "hf_demo_key_public" else Config.HUGGINGFACE_MODEL
-            
-            return {
-                "answer": answer[:200],  # Limit answer length
-                "provider": "huggingface",
-                "model": model_used,
-                "success": True
-            }
+                return {"success": False, "error": "No meaningful response"}
             
     except Exception as e:
-        return {"success": False, "error": str(e), "provider": "huggingface"}
+        return {"success": False, "error": str(e)}
 
-def generate_fallback_answer(question: str, relevant_chunks: List[Dict[str, Any]]) -> str:
-    """Generate answers using intelligent text processing and context analysis.
+def extract_answer_from_text(question: str, chunks: List[str]) -> str:
+    """Extract answer using simple text processing."""
+    if not chunks:
+        return "No relevant information found in the document."
     
-    This function uses ONLY natural language processing and semantic analysis.
-    NO hardcoded patterns or predetermined responses are used.
-    """
-    if not relevant_chunks:
-        return "Information not available in the provided document."
+    # Combine relevant chunks
+    combined_text = " ".join(chunks)
     
-    # Combine the most relevant chunks for analysis
-    combined_text = " ".join([chunk['text'] for chunk in relevant_chunks[:3]])
-    question_lower = question.lower()
-    
-    # Extract key information using natural language processing techniques
-    # Find sentences that are most relevant to the question
+    # Find sentences most relevant to the question
     sentences = re.split(r'[.!?]+', combined_text)
-    question_words = set(re.findall(r'\b\w+\b', question_lower))
+    question_words = set(re.findall(r'\w+', question.lower()))
     
     # Remove common stop words
-    stop_words = {
-        'what', 'is', 'the', 'are', 'does', 'do', 'can', 'will', 'how', 'when', 
-        'where', 'why', 'which', 'under', 'this', 'policy', 'a', 'an', 'and', 
-        'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'
-    }
-    key_question_words = question_words - stop_words
+    stop_words = {'what', 'is', 'the', 'are', 'does', 'do', 'can', 'will', 'how', 'when', 'where', 'why', 'which'}
+    key_words = question_words - stop_words
     
-    # Score sentences based on relevance to the question
-    scored_sentences = []
+    best_sentence = ""
+    best_score = 0
+    
     for sentence in sentences:
         sentence = sentence.strip()
-        if len(sentence) < 15:  # Skip very short sentences
+        if len(sentence) < 15:
             continue
-            
-        sentence_lower = sentence.lower()
-        sentence_words = set(re.findall(r'\b\w+\b', sentence_lower))
         
-        # Calculate semantic relevance score
-        word_overlap = len(key_question_words.intersection(sentence_words))
-        overlap_score = word_overlap / max(len(key_question_words), 1) if key_question_words else 0
+        sentence_words = set(re.findall(r'\w+', sentence.lower()))
+        overlap = len(key_words.intersection(sentence_words))
         
-        # Boost score for sentences containing numbers (often contain specific details)
-        number_boost = 0.2 if re.search(r'\b\d+\b', sentence) else 0
+        score = overlap / max(len(key_words), 1) if key_words else 0
         
-        # Boost score for sentences with typical answer indicators
-        answer_indicators = [
-            'period', 'days', 'months', 'years', 'covered', 'coverage', 'benefit', 
-            'amount', 'limit', 'percentage', 'provided', 'available', 'eligible',
-            'required', 'includes', 'excludes', 'shall', 'will', 'must'
-        ]
-        indicator_boost = sum(0.1 for indicator in answer_indicators if indicator in sentence_lower)
+        # Boost for numbers
+        if re.search(r'\d+', sentence):
+            score += 0.2
         
-        # Penalize very long sentences (might be less focused)
-        length_penalty = -0.1 if len(sentence) > 200 else 0
-        
-        total_score = overlap_score + number_boost + indicator_boost + length_penalty
-        
-        if total_score > 0.1:  # Only consider sentences with meaningful relevance
-            scored_sentences.append({
-                'text': sentence,
-                'score': total_score,
-                'word_overlap': word_overlap
-            })
+        if score > best_score:
+            best_score = score
+            best_sentence = sentence
     
-    # Sort by score and get the best sentence
-    scored_sentences.sort(key=lambda x: x['score'], reverse=True)
-    
-    if scored_sentences:
-        best_sentence = scored_sentences[0]['text'].strip()
-        
-        # Ensure the sentence ends properly
+    if best_sentence and best_score > 0.1:
         if not best_sentence.endswith(('.', '!', '?')):
             best_sentence += '.'
-            
         return best_sentence
     
-    # If no good sentence found, try to extract key phrases
-    # Look for phrases that might contain the answer
-    key_phrases = []
-    
-    # Extract phrases around question keywords
-    for word in key_question_words:
-        pattern = rf'\b.{{0,50}}{re.escape(word)}.{{0,50}}\b'
-        matches = re.findall(pattern, combined_text, re.IGNORECASE)
-        key_phrases.extend(matches)
-    
-    if key_phrases:
-        # Find the phrase with the most question words
-        best_phrase = ""
-        best_count = 0
-        
-        for phrase in key_phrases:
-            phrase_words = set(re.findall(r'\b\w+\b', phrase.lower()))
-            overlap_count = len(key_question_words.intersection(phrase_words))
-            
-            if overlap_count > best_count:
-                best_count = overlap_count
-                best_phrase = phrase.strip()
-        
-        if best_phrase and len(best_phrase) > 20:
-            # Clean up the phrase and make it a proper sentence
-            best_phrase = re.sub(r'\s+', ' ', best_phrase)
-            if not best_phrase.endswith(('.', '!', '?')):
-                best_phrase += '.'
-            return best_phrase
-    
-    # Final fallback: return the first substantial sentence from the most relevant chunk
-    if relevant_chunks:
-        first_chunk_sentences = re.split(r'[.!?]+', relevant_chunks[0]['text'])
-        for sentence in first_chunk_sentences:
-            sentence = sentence.strip()
-            if len(sentence) > 30:  # Ensure it's substantial
-                if not sentence.endswith(('.', '!', '?')):
-                    sentence += '.'
-                return sentence
+    # Fallback to first substantial sentence
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if len(sentence) > 30:
+            if not sentence.endswith(('.', '!', '?')):
+                sentence += '.'
+            return sentence
     
     return "The requested information is available in the document but requires more specific context."
 
-async def generate_answer_with_langchain(question: str, document_text: str) -> str:
-    """Generate answer using LangChain's advanced capabilities."""
+async def generate_answer(question: str, document_text: str) -> str:
+    """Generate answer using available LLM providers with fallbacks."""
     try:
-        if LANGCHAIN_AVAILABLE:
-            # Initialize LangChain components
-            processor = LangChainDocumentProcessor()
-            llm_provider = LangChainLLMProvider()
-            
-            # Process document
-            documents = await processor.process_document(document_text)
-            if not documents:
-                raise Exception("Document processing failed")
-            
-            # Create vectorstore
-            vectorstore_created = await processor.create_vectorstore(documents)
-            if not vectorstore_created:
-                raise Exception("Vectorstore creation failed")
-            
-            # Try LangChain RetrievalQA first
+        # Chunk the document
+        chunks = simple_chunk_text(document_text)
+        
+        # Find relevant chunks
+        relevant_chunks = simple_search(question, chunks)
+        
+        if not relevant_chunks:
+            return "No relevant information found in the document."
+        
+        context = " ".join(relevant_chunks)
+        
+        # Try LLM providers in order
+        providers = [
+            ("OpenAI", call_openai),
+            ("Anthropic", call_anthropic),
+            ("HuggingFace", call_huggingface)
+        ]
+        
+        for provider_name, provider_func in providers:
             try:
-                result = await llm_provider.query_with_langchain(question, processor.vectorstore)
+                result = await provider_func(question, context)
                 if result.get("success"):
                     return result["answer"]
             except Exception as e:
-                print(f"LangChain RetrievalQA failed: {e}")
-            
-            # Fallback to similarity search + manual LLM calls
-            search_results = await processor.similarity_search(question, k=Config.MAX_RELEVANT_CHUNKS)
-            if search_results:
-                context = " ".join([chunk['text'] for chunk in search_results])
-                
-                # Try individual LLM providers
-                for provider_name, provider_func in [
-                    ("openai", call_openai),
-                    ("anthropic", call_anthropic),
-                    ("huggingface", call_huggingface)
-                ]:
-                    try:
-                        result = await provider_func(question, context)
-                        if result.get("success"):
-                            return result["answer"]
-                    except Exception as e:
-                        print(f"Provider {provider_name} failed: {e}")
-                        continue
-                
-                # Final fallback to local processing
-                return generate_fallback_answer(question, search_results)
+                print(f"{provider_name} failed: {e}")
+                continue
         
-        # Complete fallback when LangChain is not available
-        relevant_chunks = await langchain_vector_search(document_text, [question])
-        return await generate_answer_with_fallback(question, relevant_chunks)
+        # Final fallback to local processing
+        return extract_answer_from_text(question, relevant_chunks)
         
     except Exception as e:
-        print(f"LangChain answer generation failed: {e}")
-        # Ultimate fallback
-        relevant_chunks = await langchain_vector_search(document_text, [question])
-        return await generate_answer_with_fallback(question, relevant_chunks)
-
-async def generate_answer_with_fallback(question: str, relevant_chunks: List[Dict[str, Any]]) -> str:
-    """Generate answer using multiple LLM providers with fallback."""
-    if not relevant_chunks:
-        return "No relevant information found in the document."
-    
-    context = " ".join([chunk['text'] for chunk in relevant_chunks])
-    
-    # Try LLM providers in order: OpenAI -> Anthropic -> Hugging Face -> Local fallback
-    llm_providers = [
-        ("openai", call_openai),
-        ("anthropic", call_anthropic),
-        ("huggingface", call_huggingface)
-    ]
-    
-    for provider_name, provider_func in llm_providers:
-        try:
-            result = await provider_func(question, context)
-            if result.get("success"):
-                return result["answer"]
-        except Exception as e:
-            print(f"Provider {provider_name} failed: {e}")
-            continue
-    
-    # Fallback to local processing
-    return generate_fallback_answer(question, relevant_chunks)
+        print(f"Answer generation failed: {e}")
+        return "Unable to process the question at this time."
 
 # API Endpoints
 @app.get("/")
 async def root():
     return {
-        "message": "LangChain Document Query System",
+        "message": "Document Query System",
         "status": "operational",
         "endpoint": "/hackrx/run",
         "timestamp": datetime.now().isoformat()
@@ -1178,7 +413,6 @@ async def root():
 async def health():
     return {
         "status": "healthy",
-        "langchain_available": LANGCHAIN_AVAILABLE,
         "pdf_support": PDF_AVAILABLE,
         "timestamp": datetime.now().isoformat()
     }
@@ -1207,13 +441,10 @@ async def run_submissions(request_body: RunRequest, request: Request):
         answers = []
         
         for question in request_body.questions:
-            # Use LangChain-powered answer generation
-            answer = await generate_answer_with_langchain(question, document_text)
+            answer = await generate_answer(question, document_text)
             answers.append(answer)
         
-        return RunResponse(
-            answers=answers
-        )
+        return RunResponse(answers=answers)
         
     except HTTPException:
         raise
