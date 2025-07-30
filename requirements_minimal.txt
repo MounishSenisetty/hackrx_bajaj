@@ -2,5 +2,3 @@ fastapi
 httpx
 pydantic
 uvicorn
-anthropic
-openai
