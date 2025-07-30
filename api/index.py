@@ -9,12 +9,19 @@ import asyncio
 import io
 import hashlib
 import sqlite3
+import math
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 import httpx
-import numpy as np
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field
+
+# Try to import numpy, but provide fallback
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
 
 # PDF Processing
 try:
@@ -90,7 +97,13 @@ class VectorDB:
         
         # Insert new chunks
         for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-            embedding_blob = np.array(embedding, dtype=np.float32).tobytes()
+            # Convert embedding to binary format
+            if NUMPY_AVAILABLE:
+                embedding_blob = np.array(embedding, dtype=np.float32).tobytes()
+            else:
+                # Simple binary encoding for list of floats
+                embedding_blob = json.dumps(embedding).encode('utf-8')
+            
             cursor.execute('''
                 INSERT INTO document_chunks (document_hash, chunk_id, content, embedding)
                 VALUES (?, ?, ?, ?)
@@ -116,26 +129,48 @@ class VectorDB:
         if not chunks:
             return []
         
-        query_vec = np.array(query_embedding, dtype=np.float32)
         similarities = []
         
         for chunk_id, content, embedding_blob in chunks:
-            chunk_embedding = np.frombuffer(embedding_blob, dtype=np.float32)
+            # Decode embedding
+            if NUMPY_AVAILABLE:
+                try:
+                    chunk_embedding = np.frombuffer(embedding_blob, dtype=np.float32).tolist()
+                except:
+                    chunk_embedding = json.loads(embedding_blob.decode('utf-8'))
+            else:
+                chunk_embedding = json.loads(embedding_blob.decode('utf-8'))
             
-            # Cosine similarity
-            similarity = np.dot(query_vec, chunk_embedding) / (
-                np.linalg.norm(query_vec) * np.linalg.norm(chunk_embedding)
-            )
+            # Calculate cosine similarity without numpy
+            similarity = self.cosine_similarity(query_embedding, chunk_embedding)
             
             similarities.append({
                 'chunk_id': chunk_id,
                 'content': content,
-                'similarity': float(similarity)
+                'similarity': similarity
             })
         
         # Sort by similarity and return top k
         similarities.sort(key=lambda x: x['similarity'], reverse=True)
         return similarities[:top_k]
+    
+    def cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
+        """Calculate cosine similarity between two vectors without numpy."""
+        if NUMPY_AVAILABLE:
+            # Use numpy for better performance
+            v1 = np.array(vec1)
+            v2 = np.array(vec2)
+            return float(np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2)))
+        else:
+            # Pure Python implementation
+            dot_product = sum(a * b for a, b in zip(vec1, vec2))
+            magnitude1 = math.sqrt(sum(a * a for a in vec1))
+            magnitude2 = math.sqrt(sum(b * b for b in vec2))
+            
+            if magnitude1 == 0 or magnitude2 == 0:
+                return 0.0
+            
+            return dot_product / (magnitude1 * magnitude2)
     
     def document_exists(self, document_hash: str) -> bool:
         """Check if document is already processed and stored."""
