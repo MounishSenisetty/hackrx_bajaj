@@ -25,6 +25,14 @@ except ImportError as e:
     HTTP_CLIENT_AVAILABLE = False
     raise
 
+# Import simple answer generator to avoid external API issues
+try:
+    from simple_answer import SimpleAnswerGenerator
+    SIMPLE_ANSWER_AVAILABLE = True
+except ImportError:
+    SIMPLE_ANSWER_AVAILABLE = False
+    logger.warning("Simple answer generator not available")
+
 # Initialize FastAPI app
 app = FastAPI(
     title="LLM-Powered Intelligent Query-Retrieval System",
@@ -269,7 +277,16 @@ def keyword_search_enhanced(query: str, chunks: List[Dict[str, Any]]) -> List[Di
 
 # --- Answer Generation ---
 async def generate_precise_answer(question: str, relevant_chunks: List[Dict[str, Any]]) -> AnswerResponse:
-    """Generate precise answers from relevant chunks."""
+    """Generate precise answers from relevant chunks without external API calls."""
+    try:
+        # Use simple answer generator to avoid 403 errors
+        if SIMPLE_ANSWER_AVAILABLE:
+            result = SimpleAnswerGenerator.generate_answer(question, relevant_chunks)
+            return AnswerResponse(**result)
+    except Exception as e:
+        logger.warning(f"Simple answer generator failed: {e}")
+    
+    # Fallback implementation
     if not relevant_chunks:
         return AnswerResponse(
             answer="Information not available in the provided document.",
@@ -310,11 +327,12 @@ async def generate_precise_answer(question: str, relevant_chunks: List[Dict[str,
     
     confidence = min(best_chunk['score'], 1.0)
     
+    # NO EXTERNAL API CALLS TO AVOID 403 ERRORS
     return AnswerResponse(
         answer=answer,
         confidence_score=confidence,
         relevant_chunks=relevant_chunks,
-        reasoning=f"Answer extracted from {len(relevant_chunks)} relevant document sections using semantic analysis."
+        reasoning=f"Answer extracted from {len(relevant_chunks)} relevant document sections using text analysis (no external API calls to avoid 403 errors)."
     )
 
 # --- API Endpoints ---
