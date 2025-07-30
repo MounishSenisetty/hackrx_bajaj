@@ -128,44 +128,132 @@ def extract_text_fallback(content: bytes) -> str:
         return "Document content could not be decoded"
 
 def chunk_text(text: str) -> List[Dict[str, Any]]:
-    """Smart text chunking for policy documents."""
-    chunk_size = 1000  # Larger chunks for better context
-    overlap = 200
+    """Smart text chunking for any document type."""
+    chunk_size = 800  # Optimal size for most document types
+    overlap = 150
     chunks = []
     
-    # First, try to split by paragraphs or sections
-    paragraphs = re.split(r'\n\s*\n', text)
+    # Clean the text first
+    text = re.sub(r'\s+', ' ', text)  # Normalize whitespace
+    text = text.strip()
     
-    # If we have good paragraph structure, use that
-    if len(paragraphs) > 5:
+    if len(text) < chunk_size:
+        # If document is small, return as single chunk
+        return [{
+            'text': text,
+            'score': 0.5,
+            'metadata': {'chunk_id': 0, 'type': 'full_document'}
+        }]
+    
+    # Strategy 1: Try section-based chunking (headers, titles, etc.)
+    section_patterns = [
+        r'\n\s*(?:Chapter|Section|Part|Article)\s+\d+.*?\n',
+        r'\n\s*\d+\.\s+[A-Z][^.\n]*\n',
+        r'\n\s*[A-Z][A-Z\s]{10,}\n',  # All caps headers
+        r'\n\s*\*{2,}.*?\*{2,}\s*\n',  # Headers with asterisks
+        r'\n\s*={3,}\s*\n',  # Lines with equals signs
+        r'\n\s*-{3,}\s*\n'   # Lines with dashes
+    ]
+    
+    sections = []
+    for pattern in section_patterns:
+        if re.search(pattern, text, re.IGNORECASE):
+            sections = re.split(pattern, text, flags=re.IGNORECASE)
+            break
+    
+    if len(sections) > 3:  # Good section structure found
         current_chunk = ""
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
+        for section in sections:
+            section = section.strip()
+            if not section:
                 continue
                 
-            # If adding this paragraph would exceed chunk size, save current chunk
-            if len(current_chunk) + len(para) > chunk_size and current_chunk:
+            # If adding this section would exceed chunk size, save current chunk
+            if len(current_chunk) + len(section) > chunk_size and current_chunk:
                 chunks.append({
                     'text': current_chunk.strip(),
-                    'score': 0.5,
-                    'metadata': {'chunk_id': len(chunks), 'type': 'paragraph'}
+                    'score': 0.6,
+                    'metadata': {'chunk_id': len(chunks), 'type': 'section_based'}
                 })
                 # Start new chunk with overlap
-                current_chunk = current_chunk[-overlap:] + " " + para
+                current_chunk = current_chunk[-overlap:] + " " + section
             else:
-                current_chunk += " " + para if current_chunk else para
+                current_chunk += " " + section if current_chunk else section
         
         # Add the last chunk
         if current_chunk.strip():
             chunks.append({
                 'text': current_chunk.strip(),
-                'score': 0.5,
-                'metadata': {'chunk_id': len(chunks), 'type': 'paragraph'}
+                'score': 0.6,
+                'metadata': {'chunk_id': len(chunks), 'type': 'section_based'}
             })
     
-    # Fallback to word-based chunking if paragraph approach doesn't work well
+    # Strategy 2: Paragraph-based chunking
     if len(chunks) < 3:
+        chunks = []
+        paragraphs = re.split(r'\n\s*\n', text)
+        
+        if len(paragraphs) > 5:  # Good paragraph structure
+            current_chunk = ""
+            for para in paragraphs:
+                para = para.strip()
+                if not para:
+                    continue
+                    
+                # If adding this paragraph would exceed chunk size, save current chunk
+                if len(current_chunk) + len(para) > chunk_size and current_chunk:
+                    chunks.append({
+                        'text': current_chunk.strip(),
+                        'score': 0.5,
+                        'metadata': {'chunk_id': len(chunks), 'type': 'paragraph_based'}
+                    })
+                    # Start new chunk with overlap
+                    current_chunk = current_chunk[-overlap:] + " " + para
+                else:
+                    current_chunk += " " + para if current_chunk else para
+            
+            # Add the last chunk
+            if current_chunk.strip():
+                chunks.append({
+                    'text': current_chunk.strip(),
+                    'score': 0.5,
+                    'metadata': {'chunk_id': len(chunks), 'type': 'paragraph_based'}
+                })
+    
+    # Strategy 3: Sentence-based chunking (for documents with good sentence structure)
+    if len(chunks) < 3:
+        chunks = []
+        sentences = re.split(r'[.!?]+', text)
+        
+        current_chunk = ""
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if len(sentence) < 10:  # Skip very short sentences
+                continue
+                
+            # If adding this sentence would exceed chunk size, save current chunk
+            if len(current_chunk) + len(sentence) > chunk_size and current_chunk:
+                chunks.append({
+                    'text': current_chunk.strip() + '.',
+                    'score': 0.4,
+                    'metadata': {'chunk_id': len(chunks), 'type': 'sentence_based'}
+                })
+                # Start new chunk with overlap
+                overlap_sentences = current_chunk.split('.')[-2:]  # Last 2 sentences for overlap
+                current_chunk = '. '.join(overlap_sentences) + ". " + sentence
+            else:
+                current_chunk += ". " + sentence if current_chunk else sentence
+        
+        # Add the last chunk
+        if current_chunk.strip():
+            chunks.append({
+                'text': current_chunk.strip() + '.',
+                'score': 0.4,
+                'metadata': {'chunk_id': len(chunks), 'type': 'sentence_based'}
+            })
+    
+    # Strategy 4: Fixed-size word chunking (fallback)
+    if len(chunks) < 2:
         chunks = []
         words = text.split()
         
@@ -175,22 +263,41 @@ def chunk_text(text: str) -> List[Dict[str, Any]]:
             
             chunks.append({
                 'text': chunk_text,
-                'score': 0.5,
+                'score': 0.3,
                 'metadata': {'chunk_id': len(chunks), 'type': 'word_based'}
             })
+    
+    # Ensure we have at least one chunk
+    if not chunks:
+        chunks = [{
+            'text': text[:2000],  # Take first 2000 chars as fallback
+            'score': 0.2,
+            'metadata': {'chunk_id': 0, 'type': 'fallback'}
+        }]
     
     return chunks
 
 def simple_search(query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Enhanced keyword-based search for policy documents."""
+    """Enhanced keyword-based search for any document type."""
     query_words = set(re.findall(r'\w+', query.lower()))
     scored_chunks = []
     
-    # Keywords that indicate important policy information
-    policy_keywords = {
-        'grace period', 'waiting period', 'maternity', 'cataract', 'organ donor', 
-        'claim discount', 'health check', 'hospital', 'ayush', 'room rent', 'icu',
-        'premium', 'coverage', 'benefit', 'policy', 'insured', 'treatment'
+    # Generic keywords that indicate important information across document types
+    important_keywords = {
+        # Financial/Business terms
+        'cost', 'price', 'fee', 'amount', 'payment', 'revenue', 'profit', 'budget',
+        # Time-related terms
+        'date', 'deadline', 'period', 'duration', 'time', 'schedule', 'term',
+        # Process/Action terms
+        'process', 'procedure', 'method', 'steps', 'requirements', 'conditions',
+        # Legal/Compliance terms
+        'policy', 'regulation', 'compliance', 'requirement', 'obligation', 'right',
+        # Quantitative terms
+        'percentage', 'rate', 'ratio', 'limit', 'maximum', 'minimum', 'threshold',
+        # Status/State terms
+        'available', 'eligible', 'covered', 'included', 'excluded', 'applicable',
+        # Common document sections
+        'overview', 'summary', 'details', 'specification', 'description', 'definition'
     }
     
     for chunk in chunks:
@@ -201,20 +308,47 @@ def simple_search(query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, An
         overlap = len(query_words.intersection(chunk_words))
         base_score = overlap / len(query_words) if query_words else 0
         
-        # Boost score for policy-relevant terms
-        policy_boost = 0
-        for keyword in policy_keywords:
+        # Boost score for important keywords
+        keyword_boost = 0
+        for keyword in important_keywords:
             if keyword in chunk_text_lower:
-                policy_boost += 0.1
+                keyword_boost += 0.05  # Smaller boost for generic terms
         
         # Boost score for exact phrase matches
         phrase_boost = 0
         query_text = query.lower()
         if len(query_text) > 10 and query_text in chunk_text_lower:
-            phrase_boost = 0.3
+            phrase_boost = 0.4
+        
+        # Boost for partial phrase matches (2+ consecutive words)
+        query_parts = query_text.split()
+        if len(query_parts) >= 2:
+            for i in range(len(query_parts) - 1):
+                phrase = ' '.join(query_parts[i:i+2])
+                if phrase in chunk_text_lower:
+                    phrase_boost += 0.2
+        
+        # Boost for numerical content if query contains numbers
+        number_boost = 0
+        if re.search(r'\d+', query) and re.search(r'\d+', chunk['text']):
+            number_boost = 0.1
+        
+        # Boost for definition-style content
+        definition_boost = 0
+        if any(word in query.lower() for word in ['what is', 'define', 'definition', 'meaning']):
+            if any(pattern in chunk_text_lower for pattern in ['means', 'defined as', 'refers to', ':']):
+                definition_boost = 0.3
+        
+        # Penalize very short or very long chunks
+        length_penalty = 0
+        chunk_length = len(chunk['text'])
+        if chunk_length < 50:
+            length_penalty = -0.2
+        elif chunk_length > 2000:
+            length_penalty = -0.1
         
         # Calculate final score
-        final_score = base_score + policy_boost + phrase_boost
+        final_score = base_score + keyword_boost + phrase_boost + number_boost + definition_boost + length_penalty
         
         if final_score > 0 or overlap > 0:
             chunk_copy = chunk.copy()
@@ -393,161 +527,156 @@ Answer:"""
         return {"success": False, "error": str(e), "provider": "huggingface"}
 
 def generate_fallback_answer(question: str, relevant_chunks: List[Dict[str, Any]]) -> str:
-    """Generate a fallback answer using smart text processing for policy documents."""
+    """Generate a fallback answer using intelligent text processing for any document type."""
     if not relevant_chunks:
         return "Information not available in the provided document."
     
     # Combine all relevant chunks for better context
     context = " ".join([chunk['text'] for chunk in relevant_chunks])
-    
-    # Extract key information based on question type
     question_lower = question.lower()
     
-    # Pattern matching for specific policy questions
-    if 'grace period' in question_lower and 'premium' in question_lower:
-        # Look for grace period information
-        grace_patterns = [
-            r'grace period.*?(\d+)\s*days?.*?premium',
-            r'premium.*?grace period.*?(\d+)\s*days?',
-            r'(\d+)\s*days?.*?grace period',
-            r'grace period.*?thirty.*?days?',
-        ]
-        for pattern in grace_patterns:
-            match = re.search(pattern, context, re.IGNORECASE)
-            if match:
-                if 'thirty' in match.group(0).lower():
-                    return "A grace period of thirty days is provided for premium payment after the due date to renew or continue the policy without losing continuity benefits."
-                elif match.group(1):
-                    days = match.group(1)
-                    return f"A grace period of {days} days is provided for premium payment after the due date to renew or continue the policy without losing continuity benefits."
+    # Generic pattern matching for common question types
     
-    elif 'waiting period' in question_lower and ('pre-existing' in question_lower or 'ped' in question_lower):
-        # Look for PED waiting period
-        if '36 months' in context or 'thirty-six' in context.lower():
-            return "There is a waiting period of thirty-six (36) months of continuous coverage from the first policy inception for pre-existing diseases and their direct complications to be covered."
+    # Time period questions (days, months, years)
+    time_patterns = [
+        (r'(\d+)\s*days?', 'days'),
+        (r'(\d+)\s*months?', 'months'), 
+        (r'(\d+)\s*years?', 'years'),
+        (r'(\d+)\s*weeks?', 'weeks')
+    ]
+    
+    # Look for numerical values and percentages
+    if any(word in question_lower for word in ['how much', 'percentage', 'rate', 'amount', 'cost', 'fee']):
+        # Extract percentages
+        percentage_matches = re.findall(r'(\d+(?:\.\d+)?)%', context)
+        if percentage_matches:
+            # Find the most relevant percentage based on context
+            for percentage in percentage_matches:
+                context_around = ""
+                for sentence in re.split(r'[.!?]+', context):
+                    if f"{percentage}%" in sentence:
+                        context_around = sentence.strip()
+                        break
+                if context_around:
+                    return f"The rate/percentage is {percentage}%. {context_around[:200]}..."
         
-        ped_patterns = [
-            r'waiting period.*?(\d+)\s*months?.*?pre-existing',
-            r'pre-existing.*?(\d+)\s*months?.*?continuous coverage',
-            r'(\d+)\s*months?.*?continuous coverage.*?pre-existing',
-        ]
-        for pattern in ped_patterns:
-            match = re.search(pattern, context, re.IGNORECASE)
-            if match:
-                months = match.group(1)
-                return f"There is a waiting period of {months} months of continuous coverage for pre-existing diseases to be covered."
+        # Extract monetary amounts
+        money_matches = re.findall(r'(?:INR|USD|\$|₹)\s*[\d,]+(?:\.\d+)?', context, re.IGNORECASE)
+        if money_matches:
+            return f"The amount mentioned is {money_matches[0]}. Additional details may be available in the document."
     
-    elif 'maternity' in question_lower:
-        # Look for maternity coverage information
-        if 'maternity' in context.lower():
-            if '24 months' in context or 'twenty-four' in context.lower():
-                return "Yes, the policy covers maternity expenses, including childbirth and lawful medical termination of pregnancy. To be eligible, the female insured person must have been continuously covered for at least 24 months. The benefit is limited to two deliveries or terminations during the policy period."
-            elif 'covered' in context.lower():
-                return "Yes, the policy covers maternity expenses with specific conditions and waiting periods for continuous coverage."
+    # Time-related questions
+    if any(word in question_lower for word in ['when', 'period', 'duration', 'time', 'deadline']):
+        for pattern, unit in time_patterns:
+            matches = re.findall(pattern, context, re.IGNORECASE)
+            if matches:
+                # Find context around the time period
+                for match in matches:
+                    context_sentences = re.split(r'[.!?]+', context)
+                    for sentence in context_sentences:
+                        if f"{match} {unit}" in sentence.lower() or f"{match}{unit}" in sentence.lower():
+                            return f"The time period is {match} {unit}. {sentence.strip()}"
     
-    elif 'cataract' in question_lower and 'waiting' in question_lower:
-        # Look for cataract waiting period
-        if 'two years' in context.lower() or '2 years' in context or 'two (2) years' in context:
-            return "The policy has a specific waiting period of two (2) years for cataract surgery."
+    # Yes/No questions
+    if question_lower.startswith(('is ', 'are ', 'does ', 'do ', 'can ', 'will ', 'should ')):
+        # Look for affirmative/negative indicators
+        positive_indicators = ['yes', 'covered', 'included', 'available', 'provided', 'allowed', 'eligible']
+        negative_indicators = ['no', 'not covered', 'excluded', 'not available', 'not provided', 'not allowed']
         
-        cataract_patterns = [
-            r'cataract.*?(\d+)\s*years?',
-            r'waiting.*?(\d+)\s*years?.*?cataract',
-        ]
-        for pattern in cataract_patterns:
-            match = re.search(pattern, context, re.IGNORECASE)
-            if match:
-                years = match.group(1)
-                return f"The policy has a waiting period of {years} years for cataract surgery."
-    
-    elif 'organ donor' in question_lower:
-        if 'organ donor' in context.lower() and ('covered' in context.lower() or 'indemnifies' in context.lower()):
-            return "Yes, the policy indemnifies the medical expenses for the organ donor's hospitalization for the purpose of harvesting the organ, provided the organ is for an insured person and the donation complies with the Transplantation of Human Organs Act, 1994."
-    
-    elif 'no claim discount' in question_lower or 'ncd' in question_lower:
-        # Look for NCD information
-        if '5%' in context and ('no claim' in context.lower() or 'ncd' in context.lower()):
-            return "A No Claim Discount of 5% on the base premium is offered on renewal for a one-year policy term if no claims were made in the preceding year. The maximum aggregate NCD is capped at 5% of the total base premium."
+        context_lower = context.lower()
+        positive_count = sum(1 for indicator in positive_indicators if indicator in context_lower)
+        negative_count = sum(1 for indicator in negative_indicators if indicator in context_lower)
         
-        ncd_patterns = [
-            r'no claim discount.*?(\d+)%',
-            r'ncd.*?(\d+)%',
-            r'(\d+)%.*?no claim discount',
+        if positive_count > negative_count:
+            # Find the most relevant positive sentence
+            for sentence in re.split(r'[.!?]+', context):
+                if any(indicator in sentence.lower() for indicator in positive_indicators):
+                    return f"Yes, {sentence.strip().lower()}"
+        elif negative_count > positive_count:
+            # Find the most relevant negative sentence
+            for sentence in re.split(r'[.!?]+', context):
+                if any(indicator in sentence.lower() for indicator in negative_indicators):
+                    return f"No, {sentence.strip().lower()}"
+    
+    # Definition questions
+    if any(word in question_lower for word in ['what is', 'define', 'definition', 'meaning', 'means']):
+        # Look for definition patterns
+        definition_patterns = [
+            r'means\s+(.{20,200}?)[\.\n]',
+            r'is\s+defined\s+as\s+(.{20,200}?)[\.\n]',
+            r'refers\s+to\s+(.{20,200}?)[\.\n]',
+            r':\s*(.{20,200}?)[\.\n]'
         ]
-        for pattern in ncd_patterns:
-            match = re.search(pattern, context, re.IGNORECASE)
-            if match:
-                percentage = match.group(1)
-                return f"A No Claim Discount of {percentage}% is offered on renewal if no claims were made."
-    
-    elif 'health check' in question_lower or 'preventive' in question_lower:
-        if 'health check' in context.lower() or 'check-up' in context.lower():
-            if 'two continuous policy years' in context.lower() or 'block of two' in context.lower():
-                return "Yes, the policy reimburses expenses for health check-ups at the end of every block of two continuous policy years, provided the policy has been renewed without a break. The amount is subject to the limits specified in the Table of Benefits."
-            return "Yes, the policy provides benefits for preventive health check-ups with specific conditions."
-    
-    elif 'hospital' in question_lower and 'define' in question_lower:
-        # Look for hospital definition
-        if 'inpatient beds' in context.lower() and ('10' in context or '15' in context):
-            return "A hospital is defined as an institution with at least 10 inpatient beds (in towns with a population below ten lakhs) or 15 beds (in all other places), with qualified nursing staff and medical practitioners available 24/7, a fully equipped operation theatre, and which maintains daily records of patients."
         
-        hospital_patterns = [
-            r'hospital.*?(\d+).*?beds?',
-            r'(\d+).*?beds?.*?hospital',
-        ]
-        for pattern in hospital_patterns:
-            match = re.search(pattern, context, re.IGNORECASE)
-            if match:
-                beds = match.group(1)
-                return f"A hospital is defined as an institution with at least {beds} inpatient beds along with other specified requirements."
+        for pattern in definition_patterns:
+            matches = re.findall(pattern, context, re.IGNORECASE | re.DOTALL)
+            if matches:
+                definition = matches[0].strip()
+                return f"{definition}."
     
-    elif 'ayush' in question_lower:
-        if 'ayush' in context.lower():
-            return "The policy covers medical expenses for inpatient treatment under Ayurveda, Yoga, Naturopathy, Unani, Siddha, and Homeopathy systems up to the Sum Insured limit, provided the treatment is taken in an AYUSH Hospital."
+    # Generic smart sentence extraction
+    question_keywords = set(re.findall(r'\w+', question_lower))
+    # Remove common stop words
+    stop_words = {'what', 'is', 'the', 'are', 'does', 'do', 'can', 'will', 'how', 'when', 'where', 'why', 'which'}
+    question_keywords = question_keywords - stop_words
     
-    elif 'room rent' in question_lower or ('sub-limits' in question_lower and 'plan a' in question_lower):
-        # Look for room rent limits for Plan A
-        if '1% of' in context and '2% of' in context and ('room' in context.lower() or 'icu' in context.lower()):
-            return "Yes, for Plan A, the daily room rent is capped at 1% of the Sum Insured, and ICU charges are capped at 2% of the Sum Insured. These limits do not apply if the treatment is for a listed procedure in a Preferred Provider Network (PPN)."
-        
-        rent_patterns = [
-            r'room.*?(\d+)%.*?sum insured',
-            r'(\d+)%.*?sum insured.*?room',
-        ]
-        for pattern in rent_patterns:
-            match = re.search(pattern, context, re.IGNORECASE)
-            if match:
-                percentage = match.group(1)
-                return f"Room rent is capped at {percentage}% of the Sum Insured for Plan A."
-    
-    # If no specific pattern matches, try to find the most relevant sentence
-    question_keywords = set(re.findall(r'\w+', question.lower()))
     sentences = re.split(r'[.!?]+', context)
-    
-    best_sentence = ""
-    best_score = 0
+    scored_sentences = []
     
     for sentence in sentences:
-        if len(sentence.strip()) < 20 or len(sentence.strip()) > 300:
+        sentence = sentence.strip()
+        if len(sentence) < 15 or len(sentence) > 400:
             continue
             
-        # Skip table-like content
-        if sentence.count('INR') > 2 or sentence.count('Up to SI') > 2:
+        # Skip sentences that look like table headers or metadata
+        if (sentence.count('|') > 3 or 
+            sentence.count('INR') > 2 or 
+            sentence.count('Up to SI') > 1 or
+            sentence.count('Page') > 0 and sentence.count('of') > 0):
             continue
             
         sentence_words = set(re.findall(r'\w+', sentence.lower()))
-        overlap = len(question_keywords.intersection(sentence_words))
         
-        if overlap > best_score:
-            best_score = overlap
-            best_sentence = sentence.strip()
+        # Calculate relevance score
+        keyword_overlap = len(question_keywords.intersection(sentence_words))
+        
+        # Boost score for sentences with key indicators
+        content_boost = 0
+        if any(word in sentence.lower() for word in ['including', 'such as', 'provided that', 'subject to']):
+            content_boost += 0.5
+        if any(word in sentence.lower() for word in ['shall', 'must', 'required', 'mandatory']):
+            content_boost += 0.3
+        if re.search(r'\d+', sentence):  # Contains numbers
+            content_boost += 0.2
+            
+        final_score = keyword_overlap + content_boost
+        
+        if final_score > 0:
+            scored_sentences.append((sentence, final_score))
     
-    if best_sentence and best_score > 1:
+    # Sort by score and return the best match
+    if scored_sentences:
+        scored_sentences.sort(key=lambda x: x[1], reverse=True)
+        best_sentence = scored_sentences[0][0]
+        
+        # Clean up the sentence
         if not best_sentence.endswith('.'):
             best_sentence += '.'
+            
         return best_sentence
     
-    # Final fallback
+    # Final fallback - return a summary of the most relevant chunk
+    if relevant_chunks:
+        best_chunk = relevant_chunks[0]['text']
+        # Try to find a complete sentence from the chunk
+        sentences = re.split(r'[.!?]+', best_chunk)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if len(sentence) > 30 and len(sentence) < 300:
+                if not sentence.endswith('.'):
+                    sentence += '.'
+                return sentence
+    
     return "The specific information requested is not clearly available in the provided document."
 
 async def generate_answer_with_fallback(question: str, relevant_chunks: List[Dict[str, Any]]) -> AnswerResponse:
