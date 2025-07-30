@@ -1,5 +1,5 @@
 """
-Multi-LLM API with Vector Database: OpenAI, Anthropic Claude, Hugging Face with FAISS
+LangChain-Powered Document Query System with Natural LLM Processing
 """
 
 import os
@@ -13,21 +13,39 @@ import httpx
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field
 
+# PDF Processing
 try:
     import PyPDF2
     PDF_AVAILABLE = True
 except ImportError:
     PDF_AVAILABLE = False
 
+# LangChain imports
 try:
-    from sentence_transformers import SentenceTransformer
-    import faiss
-    import numpy as np
-    VECTOR_DB_AVAILABLE = True
+    from langchain.text_splitter import RecursiveCharacterTextSplitter
+    from langchain.document_loaders import PyPDFLoader
+    from langchain.schema import Document
+    from langchain.vectorstores import FAISS
+    from langchain.embeddings import HuggingFaceEmbeddings
+    from langchain.llms import OpenAI
+    from langchain.chat_models import ChatOpenAI, ChatAnthropic
+    from langchain.chains import RetrievalQA
+    from langchain.prompts import PromptTemplate
+    from langchain.schema.runnable import RunnablePassthrough
+    from langchain.schema.output_parser import StrOutputParser
+    LANGCHAIN_AVAILABLE = True
 except ImportError:
-    VECTOR_DB_AVAILABLE = False
+    # Fallback imports for when LangChain is not available
+    try:
+        from sentence_transformers import SentenceTransformer
+        import faiss
+        import numpy as np
+        VECTOR_DB_AVAILABLE = True
+    except ImportError:
+        VECTOR_DB_AVAILABLE = False
+    LANGCHAIN_AVAILABLE = False
 
-app = FastAPI(title="Natural LLM Document Query System", version="3.0.0")
+app = FastAPI(title="LangChain Natural Document Query System", version="4.0.0")
 
 # Configuration
 class Config:
@@ -54,95 +72,133 @@ class Config:
     REQUEST_TIMEOUT = 30.0
     MAX_DOCUMENT_SIZE = 50 * 1024 * 1024  # Increased to 50MB for large documents
 
-# Vector Database Class
-class VectorDatabase:
-    """FAISS-based vector database for document chunks."""
+# LangChain-based Document Processing
+class LangChainDocumentProcessor:
+    """LangChain-powered document processing with vector search capabilities."""
     
-    def __init__(self, embedding_model_name: str = Config.EMBEDDING_MODEL):
-        self.embedding_model = None
-        self.index = None
-        self.chunks = []
+    def __init__(self):
+        self.vectorstore = None
+        self.text_splitter = None
         self.embeddings = None
+        self.llm_chain = None
         
-        if VECTOR_DB_AVAILABLE:
+        if LANGCHAIN_AVAILABLE:
             try:
-                self.embedding_model = SentenceTransformer(embedding_model_name)
-                self.embedding_dim = self.embedding_model.get_sentence_embedding_dimension()
-                # Use IndexFlatIP for cosine similarity (inner product with normalized vectors)
-                self.index = faiss.IndexFlatIP(self.embedding_dim)
-                print(f"Vector database initialized with {embedding_model_name}")
+                # Initialize text splitter for optimal chunking
+                self.text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=Config.CHUNK_SIZE,
+                    chunk_overlap=Config.CHUNK_OVERLAP,
+                    length_function=len,
+                    separators=["\n\n", "\n", ".", "!", "?", ";", ":", " ", ""]
+                )
+                
+                # Initialize embeddings
+                self.embeddings = HuggingFaceEmbeddings(
+                    model_name=Config.EMBEDDING_MODEL,
+                    model_kwargs={'device': 'cpu'},
+                    encode_kwargs={'normalize_embeddings': True}
+                )
+                
+                print("LangChain document processor initialized successfully")
+                
             except Exception as e:
-                print(f"Failed to initialize vector database: {e}")
-                VECTOR_DB_AVAILABLE = False
+                print(f"Failed to initialize LangChain components: {e}")
+                global LANGCHAIN_AVAILABLE
+                LANGCHAIN_AVAILABLE = False
     
-    def add_documents(self, chunks: List[Dict[str, Any]]) -> bool:
-        """Add document chunks to the vector database."""
-        if not VECTOR_DB_AVAILABLE or not self.embedding_model:
+    async def process_document(self, text: str) -> List[Document]:
+        """Process document text into LangChain Document objects."""
+        if not LANGCHAIN_AVAILABLE or not self.text_splitter:
+            # Fallback to simple chunking
+            return self._simple_document_chunking(text)
+        
+        try:
+            # Create documents using LangChain text splitter
+            documents = self.text_splitter.create_documents([text])
+            
+            # Add metadata to documents
+            for i, doc in enumerate(documents):
+                doc.metadata.update({
+                    'chunk_id': i,
+                    'total_chunks': len(documents),
+                    'chunk_size': len(doc.page_content),
+                    'processing_method': 'langchain_recursive'
+                })
+            
+            return documents
+            
+        except Exception as e:
+            print(f"LangChain document processing failed: {e}")
+            return self._simple_document_chunking(text)
+    
+    def _simple_document_chunking(self, text: str) -> List[Document]:
+        """Fallback chunking when LangChain is not available."""
+        chunk_size = Config.CHUNK_SIZE * 4  # Convert to characters
+        chunks = []
+        
+        for i in range(0, len(text), chunk_size):
+            chunk_text = text[i:i + chunk_size]
+            doc = Document(
+                page_content=chunk_text,
+                metadata={
+                    'chunk_id': len(chunks),
+                    'start_char': i,
+                    'end_char': i + len(chunk_text),
+                    'processing_method': 'simple_fallback'
+                }
+            )
+            chunks.append(doc)
+        
+        return chunks
+    
+    async def create_vectorstore(self, documents: List[Document]) -> bool:
+        """Create FAISS vectorstore from documents."""
+        if not LANGCHAIN_AVAILABLE or not self.embeddings:
             return False
         
         try:
-            # Extract text from chunks
-            texts = [chunk['text'] for chunk in chunks]
+            # Create FAISS vectorstore
+            self.vectorstore = FAISS.from_documents(
+                documents=documents,
+                embedding=self.embeddings
+            )
             
-            # Generate embeddings
-            embeddings = self.embedding_model.encode(texts, convert_to_numpy=True)
-            
-            # Normalize embeddings for cosine similarity
-            faiss.normalize_L2(embeddings)
-            
-            # Add to FAISS index
-            self.index.add(embeddings.astype('float32'))
-            
-            # Store chunks and embeddings
-            self.chunks.extend(chunks)
-            if self.embeddings is None:
-                self.embeddings = embeddings
-            else:
-                self.embeddings = np.vstack([self.embeddings, embeddings])
-            
-            print(f"Added {len(chunks)} chunks to vector database")
+            print(f"Created FAISS vectorstore with {len(documents)} documents")
             return True
             
         except Exception as e:
-            print(f"Error adding documents to vector database: {e}")
+            print(f"Failed to create vectorstore: {e}")
             return False
     
-    def search(self, query: str, k: int = Config.MAX_RELEVANT_CHUNKS) -> List[Dict[str, Any]]:
-        """Search for relevant chunks using semantic similarity."""
-        if not VECTOR_DB_AVAILABLE or not self.embedding_model or len(self.chunks) == 0:
+    async def similarity_search(self, query: str, k: int = Config.MAX_RELEVANT_CHUNKS) -> List[Dict[str, Any]]:
+        """Perform similarity search using LangChain FAISS vectorstore."""
+        if not self.vectorstore:
             return []
         
         try:
-            # Generate query embedding
-            query_embedding = self.embedding_model.encode([query], convert_to_numpy=True)
+            # Use LangChain's similarity search with scores
+            docs_with_scores = self.vectorstore.similarity_search_with_score(
+                query=query,
+                k=k
+            )
             
-            # Normalize query embedding
-            faiss.normalize_L2(query_embedding)
-            
-            # Search the index
-            scores, indices = self.index.search(query_embedding.astype('float32'), k)
-            
-            # Prepare results
+            # Convert to our expected format
             results = []
-            for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
-                if idx >= 0 and score >= Config.SIMILARITY_THRESHOLD:
-                    chunk = self.chunks[idx].copy()
-                    chunk['score'] = float(score)
-                    chunk['rank'] = i + 1
-                    results.append(chunk)
+            for doc, score in docs_with_scores:
+                result = {
+                    'text': doc.page_content,
+                    'score': float(1 - score),  # Convert distance to similarity
+                    'metadata': doc.metadata.copy()
+                }
+                result['metadata']['search_type'] = 'langchain_faiss'
+                result['metadata']['similarity_score'] = float(score)
+                results.append(result)
             
             return results
             
         except Exception as e:
-            print(f"Error searching vector database: {e}")
+            print(f"LangChain similarity search failed: {e}")
             return []
-    
-    def clear(self):
-        """Clear the vector database."""
-        if VECTOR_DB_AVAILABLE and self.index is not None:
-            self.index.reset()
-            self.chunks = []
-            self.embeddings = None
 
 # Request/Response Models
 class RunRequest(BaseModel):
@@ -475,169 +531,256 @@ def simple_search(query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, An
     return scored_chunks[:5]
 
 
-async def vector_search(text: str, queries: List[str], use_vector_db: bool = True) -> List[Dict[str, Any]]:
+async def langchain_vector_search(text: str, queries: List[str]) -> List[Dict[str, Any]]:
     """
-    Enhanced search that handles questions from anywhere in the document.
-    Provides comprehensive context extraction for precise answers.
+    LangChain-powered document search with advanced vector capabilities.
     """
-    # Always try vector database first for semantic understanding
+    if not LANGCHAIN_AVAILABLE:
+        print("LangChain not available, falling back to simple search")
+        return await fallback_vector_search(text, queries)
+    
+    try:
+        # Initialize LangChain processor
+        processor = LangChainDocumentProcessor()
+        
+        # Process document into LangChain documents
+        documents = await processor.process_document(text)
+        
+        if not documents:
+            print("No documents created, falling back")
+            return await fallback_vector_search(text, queries)
+        
+        # Create vectorstore
+        vectorstore_created = await processor.create_vectorstore(documents)
+        
+        if not vectorstore_created or not processor.vectorstore:
+            print("Vectorstore creation failed, falling back")
+            return await fallback_vector_search(text, queries)
+        
+        # Perform similarity search for all queries
+        all_results = []
+        for query in queries:
+            results = await processor.similarity_search(query, k=Config.MAX_RELEVANT_CHUNKS * 2)
+            
+            # Enhance results with query-specific scoring
+            for result in results:
+                result['metadata']['query'] = query
+                result['metadata']['enhanced_langchain'] = True
+                
+                # Boost score for exact keyword matches
+                query_words = set(query.lower().split())
+                text_words = set(result['text'].lower().split())
+                keyword_overlap = len(query_words.intersection(text_words))
+                
+                if keyword_overlap > 0:
+                    keyword_boost = (keyword_overlap / len(query_words)) * 0.2
+                    result['score'] = min(1.0, result['score'] + keyword_boost)
+            
+            all_results.extend(results)
+        
+        # Remove duplicates and sort by relevance
+        unique_results = {}
+        for result in all_results:
+            chunk_id = result['metadata'].get('chunk_id', 0)
+            if chunk_id in unique_results:
+                if result['score'] > unique_results[chunk_id]['score']:
+                    unique_results[chunk_id] = result
+            else:
+                unique_results[chunk_id] = result
+        
+        final_results = list(unique_results.values())
+        final_results.sort(key=lambda x: x['score'], reverse=True)
+        
+        print(f"LangChain vector search returned {len(final_results)} results")
+        return final_results[:Config.MAX_RELEVANT_CHUNKS * 2]
+        
+    except Exception as e:
+        print(f"LangChain vector search failed: {e}")
+        return await fallback_vector_search(text, queries)
+
+async def fallback_vector_search(text: str, queries: List[str]) -> List[Dict[str, Any]]:
+    """Fallback search when LangChain is not available."""
     if VECTOR_DB_AVAILABLE:
         try:
-            # Initialize vector database
-            vector_db = VectorDatabase()
+            # Use original FAISS implementation as fallback
+            from sentence_transformers import SentenceTransformer
+            import faiss
+            import numpy as np
             
-            # Create comprehensive chunks with overlap for better context
+            # Simple implementation
             chunks = chunk_text_for_embeddings(text)
-            success = vector_db.add_documents(chunks)
+            if not chunks:
+                return []
             
-            if success:
-                # Enhanced search for each query
-                all_results = []
-                for query in queries:
-                    # Get more results for broader context
-                    results = vector_db.search(query, k=min(15, len(chunks)))
-                    
-                    # Enhance results with additional context scoring
-                    for result in results:
-                        result['metadata']['search_type'] = 'vector'
-                        result['metadata']['query'] = query
-                        
-                        # Additional scoring based on exact keyword matches
-                        query_words = set(query.lower().split())
-                        text_words = set(result['text'].lower().split())
-                        exact_matches = len(query_words.intersection(text_words))
-                        
-                        # Boost score for exact keyword matches
-                        if exact_matches > 0:
-                            keyword_boost = (exact_matches / len(query_words)) * 0.3
-                            result['score'] = min(1.0, result['score'] + keyword_boost)
-                        
-                        # Check for specific policy terms and boost relevance
-                        policy_terms = {
-                            'grace period': 1.2, 'waiting period': 1.2, 'pre-existing': 1.1,
-                            'maternity': 1.1, 'cataract': 1.1, 'organ donor': 1.1,
-                            'coverage': 1.1, 'benefits': 1.1, 'exclusions': 1.1,
-                            'premium': 1.1, 'deductible': 1.1, 'co-payment': 1.1
-                        }
-                        
-                        text_lower = result['text'].lower()
-                        for term, boost in policy_terms.items():
-                            if term in query.lower() and term in text_lower:
-                                result['score'] = min(1.0, result['score'] * boost)
-                    
-                    all_results.extend(results)
+            # Initialize embedding model
+            embedding_model = SentenceTransformer(Config.EMBEDDING_MODEL)
+            
+            # Generate embeddings
+            texts = [chunk['text'] for chunk in chunks]
+            embeddings = embedding_model.encode(texts, convert_to_numpy=True)
+            
+            # Normalize embeddings
+            faiss.normalize_L2(embeddings)
+            
+            # Create FAISS index
+            index = faiss.IndexFlatIP(embeddings.shape[1])
+            index.add(embeddings.astype('float32'))
+            
+            # Search for each query
+            all_results = []
+            for query in queries:
+                query_embedding = embedding_model.encode([query], convert_to_numpy=True)
+                faiss.normalize_L2(query_embedding)
                 
-                # Remove duplicates and merge overlapping content
-                unique_results = {}
-                for result in all_results:
-                    chunk_id = result['metadata'].get('chunk_id', 0)
-                    if chunk_id in unique_results:
-                        # Keep the result with higher score
-                        if result['score'] > unique_results[chunk_id]['score']:
-                            unique_results[chunk_id] = result
-                    else:
-                        unique_results[chunk_id] = result
+                scores, indices = index.search(query_embedding.astype('float32'), min(5, len(chunks)))
                 
-                # Sort by enhanced relevance score
-                final_results = list(unique_results.values())
-                final_results.sort(key=lambda x: x['score'], reverse=True)
-                
-                # Ensure we have sufficient context for precise answers
-                if len(final_results) > 0:
-                    # Add surrounding context for better understanding
-                    enhanced_results = []
-                    for result in final_results[:8]:  # Top 8 most relevant
-                        enhanced_result = result.copy()
-                        
-                        # Find adjacent chunks for context expansion
-                        current_chunk_id = result['metadata'].get('chunk_id', 0)
-                        for chunk in chunks:
-                            chunk_id = chunk['metadata'].get('chunk_id', 0)
-                            # Add context from adjacent chunks
-                            if abs(chunk_id - current_chunk_id) == 1:
-                                # Append adjacent context
-                                if chunk_id > current_chunk_id:
-                                    enhanced_result['text'] += " " + chunk['text'][:200]
-                                else:
-                                    enhanced_result['text'] = chunk['text'][-200:] + " " + enhanced_result['text']
-                        
-                        enhanced_results.append(enhanced_result)
-                    
-                    print(f"Enhanced vector search returned {len(enhanced_results)} contextual results")
-                    return enhanced_results
-                
+                for score, idx in zip(scores[0], indices[0]):
+                    if idx >= 0 and score >= Config.SIMILARITY_THRESHOLD:
+                        result = chunks[idx].copy()
+                        result['score'] = float(score)
+                        result['metadata']['search_type'] = 'fallback_faiss'
+                        all_results.append(result)
+            
+            # Sort and return results
+            all_results.sort(key=lambda x: x['score'], reverse=True)
+            return all_results[:Config.MAX_RELEVANT_CHUNKS]
+            
         except Exception as e:
-            print(f"Vector search failed: {e}")
+            print(f"Fallback vector search failed: {e}")
     
-    # Enhanced fallback search with comprehensive keyword matching
-    print("Using enhanced keyword search for comprehensive coverage...")
+    # Final fallback to simple keyword search
     chunks = chunk_text_for_embeddings(text)
-    
-    if not queries:
-        return chunks[:Config.MAX_RELEVANT_CHUNKS]
-    
-    # Combine all queries for comprehensive search
-    all_query_words = set()
-    for query in queries:
-        all_query_words.update(query.lower().split())
-    
-    # Enhanced keyword search with multiple scoring methods
-    scored_chunks = []
-    for chunk in chunks:
-        chunk_text_lower = chunk['text'].lower()
-        chunk_words = set(chunk_text_lower.split())
-        
-        # Multiple scoring approaches
-        scores = []
-        
-        # 1. Direct word overlap
-        overlap = len(all_query_words.intersection(chunk_words))
-        if overlap > 0:
-            scores.append((overlap / len(all_query_words)) * 0.4)
-        
-        # 2. Phrase matching for each query
-        phrase_score = 0
-        for query in queries:
-            query_lower = query.lower()
-            if query_lower in chunk_text_lower:
-                phrase_score += 0.8  # High score for exact phrase match
-            else:
-                # Partial phrase matching
-                query_words = query_lower.split()
-                for i in range(len(query_words) - 1):
-                    bigram = f"{query_words[i]} {query_words[i+1]}"
-                    if bigram in chunk_text_lower:
-                        phrase_score += 0.2
-        scores.append(phrase_score * 0.4)
-        
-        # 3. Policy-specific term weighting
-        policy_specific_score = 0
-        important_terms = [
-            'grace period', 'waiting period', 'pre-existing', 'maternity',
-            'coverage', 'covered', 'benefits', 'exclusions', 'premium',
-            'deductible', 'co-payment', 'cataract', 'organ donor'
-        ]
-        
-        for term in important_terms:
-            if any(term in query.lower() for query in queries) and term in chunk_text_lower:
-                policy_specific_score += 0.3
-        scores.append(policy_specific_score * 0.2)
-        
-        # Calculate final score
-        final_score = sum(scores)
-        
-        if final_score > 0.05:  # Lower threshold for broader coverage
-            chunk_copy = chunk.copy()
-            chunk_copy['score'] = final_score
-            chunk_copy['metadata']['search_type'] = 'enhanced_keyword'
-            scored_chunks.append(chunk_copy)
-    
-    # Sort by score and return comprehensive results
-    scored_chunks.sort(key=lambda x: x['score'], reverse=True)
-    return scored_chunks[:min(10, len(scored_chunks))]  # Return more results for better context
+    return simple_search(" ".join(queries), chunks)
 
 
-# LLM Providers
+class LangChainLLMProvider:
+    """LangChain-based LLM provider with multiple model support."""
+    
+    def __init__(self):
+        self.openai_llm = None
+        self.anthropic_llm = None
+        self.retrieval_qa_chain = None
+        
+        # Initialize LangChain LLMs
+        if LANGCHAIN_AVAILABLE:
+            try:
+                if Config.OPENAI_API_KEY:
+                    self.openai_llm = ChatOpenAI(
+                        api_key=Config.OPENAI_API_KEY,
+                        model_name=Config.OPENAI_MODEL,
+                        temperature=0.1,
+                        max_tokens=150
+                    )
+                
+                if Config.ANTHROPIC_API_KEY:
+                    self.anthropic_llm = ChatAnthropic(
+                        api_key=Config.ANTHROPIC_API_KEY,
+                        model=Config.ANTHROPIC_MODEL,
+                        temperature=0.1,
+                        max_tokens=150
+                    )
+                
+                print("LangChain LLM providers initialized")
+                
+            except Exception as e:
+                print(f"Failed to initialize LangChain LLMs: {e}")
+    
+    def create_qa_chain(self, vectorstore):
+        """Create a RetrievalQA chain using the vectorstore."""
+        if not LANGCHAIN_AVAILABLE or not vectorstore:
+            return None
+        
+        try:
+            # Create retriever from vectorstore
+            retriever = vectorstore.as_retriever(
+                search_type="similarity",
+                search_kwargs={"k": Config.MAX_RELEVANT_CHUNKS}
+            )
+            
+            # Create custom prompt template
+            prompt_template = """You are an expert document analyst. Use the following document context to answer the question precisely.
+
+Context: {context}
+
+Question: {question}
+
+Instructions:
+- Extract the exact answer from the provided context
+- Use specific numbers, dates, and terms as they appear in the document
+- Provide a clear, factual response
+- If the information is not in the context, state that clearly
+
+Answer:"""
+            
+            PROMPT = PromptTemplate(
+                template=prompt_template,
+                input_variables=["context", "question"]
+            )
+            
+            # Use the best available LLM
+            llm = self.openai_llm or self.anthropic_llm
+            if not llm:
+                return None
+            
+            # Create RetrievalQA chain
+            qa_chain = RetrievalQA.from_chain_type(
+                llm=llm,
+                chain_type="stuff",
+                retriever=retriever,
+                chain_type_kwargs={"prompt": PROMPT},
+                return_source_documents=True
+            )
+            
+            return qa_chain
+            
+        except Exception as e:
+            print(f"Failed to create QA chain: {e}")
+            return None
+    
+    async def query_with_langchain(self, question: str, vectorstore) -> Dict[str, Any]:
+        """Query using LangChain RetrievalQA chain."""
+        if not LANGCHAIN_AVAILABLE:
+            raise Exception("LangChain not available")
+        
+        try:
+            # Create QA chain if not exists
+            if not self.retrieval_qa_chain:
+                self.retrieval_qa_chain = self.create_qa_chain(vectorstore)
+            
+            if not self.retrieval_qa_chain:
+                raise Exception("Could not create QA chain")
+            
+            # Run the chain
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, 
+                lambda: self.retrieval_qa_chain({"query": question})
+            )
+            
+            answer = result.get("result", "").strip()
+            source_docs = result.get("source_documents", [])
+            
+            # Convert source documents to our format
+            relevant_chunks = []
+            for doc in source_docs:
+                chunk = {
+                    'text': doc.page_content,
+                    'metadata': doc.metadata.copy(),
+                    'score': 0.8  # LangChain doesn't return scores in RetrievalQA
+                }
+                relevant_chunks.append(chunk)
+            
+            provider_used = "openai" if self.openai_llm else "anthropic"
+            
+            return {
+                "answer": answer,
+                "provider": f"langchain_{provider_used}",
+                "model": Config.OPENAI_MODEL if self.openai_llm else Config.ANTHROPIC_MODEL,
+                "success": True,
+                "relevant_chunks": relevant_chunks
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e), "provider": "langchain"}
 async def call_openai(question: str, context: str) -> Dict[str, Any]:
     """Call OpenAI GPT API for intelligent answer extraction from document context."""
     if not Config.OPENAI_API_KEY:
@@ -958,7 +1101,127 @@ def generate_fallback_answer(question: str, relevant_chunks: List[Dict[str, Any]
     
     return "The requested information is available in the document but requires more specific context."
 
+async def generate_answer_with_langchain(question: str, document_text: str) -> AnswerResponse:
+    """Generate answer using LangChain's advanced capabilities."""
+    try:
+        if LANGCHAIN_AVAILABLE:
+            # Initialize LangChain components
+            processor = LangChainDocumentProcessor()
+            llm_provider = LangChainLLMProvider()
+            
+            # Process document
+            documents = await processor.process_document(document_text)
+            if not documents:
+                raise Exception("Document processing failed")
+            
+            # Create vectorstore
+            vectorstore_created = await processor.create_vectorstore(documents)
+            if not vectorstore_created:
+                raise Exception("Vectorstore creation failed")
+            
+            # Try LangChain RetrievalQA first
+            try:
+                result = await llm_provider.query_with_langchain(question, processor.vectorstore)
+                if result.get("success"):
+                    return AnswerResponse(
+                        answer=result["answer"],
+                        confidence_score=0.9,
+                        relevant_chunks=result.get("relevant_chunks", []),
+                        reasoning=f"Answer generated using {result['provider']} with LangChain RetrievalQA",
+                        llm_provider=result["provider"]
+                    )
+            except Exception as e:
+                print(f"LangChain RetrievalQA failed: {e}")
+            
+            # Fallback to similarity search + manual LLM calls
+            search_results = await processor.similarity_search(question, k=Config.MAX_RELEVANT_CHUNKS)
+            if search_results:
+                context = " ".join([chunk['text'] for chunk in search_results])
+                
+                # Try individual LLM providers
+                for provider_name, provider_func in [
+                    ("openai", call_openai),
+                    ("anthropic", call_anthropic),
+                    ("huggingface", call_huggingface)
+                ]:
+                    try:
+                        result = await provider_func(question, context)
+                        if result.get("success"):
+                            return AnswerResponse(
+                                answer=result["answer"],
+                                confidence_score=0.8,
+                                relevant_chunks=search_results,
+                                reasoning=f"Answer generated using {result['provider']} with LangChain similarity search",
+                                llm_provider=f"langchain_{result['provider']}"
+                            )
+                    except Exception as e:
+                        print(f"Provider {provider_name} failed: {e}")
+                        continue
+                
+                # Final fallback to local processing
+                fallback_answer = generate_fallback_answer(question, search_results)
+                return AnswerResponse(
+                    answer=fallback_answer,
+                    confidence_score=0.6,
+                    relevant_chunks=search_results,
+                    reasoning="Answer generated using LangChain similarity search + local text processing",
+                    llm_provider="langchain_local_fallback"
+                )
+        
+        # Complete fallback when LangChain is not available
+        relevant_chunks = await langchain_vector_search(document_text, [question])
+        return await generate_answer_with_fallback(question, relevant_chunks)
+        
+    except Exception as e:
+        print(f"LangChain answer generation failed: {e}")
+        # Ultimate fallback
+        relevant_chunks = await langchain_vector_search(document_text, [question])
+        return await generate_answer_with_fallback(question, relevant_chunks)
+
 async def generate_answer_with_fallback(question: str, relevant_chunks: List[Dict[str, Any]]) -> AnswerResponse:
+    """Generate answer using multiple LLM providers with fallback."""
+    if not relevant_chunks:
+        return AnswerResponse(
+            answer="No relevant information found in the document.",
+            confidence_score=0.0,
+            relevant_chunks=[],
+            reasoning="No relevant content found for the question.",
+            llm_provider="none"
+        )
+    
+    context = " ".join([chunk['text'] for chunk in relevant_chunks])
+    
+    # Try LLM providers in order: OpenAI -> Anthropic -> Hugging Face -> Local fallback
+    llm_providers = [
+        ("openai", call_openai),
+        ("anthropic", call_anthropic),
+        ("huggingface", call_huggingface)
+    ]
+    
+    for provider_name, provider_func in llm_providers:
+        try:
+            result = await provider_func(question, context)
+            if result.get("success"):
+                return AnswerResponse(
+                    answer=result["answer"],
+                    confidence_score=0.8,
+                    relevant_chunks=relevant_chunks,
+                    reasoning=f"Answer generated using {result['provider']} model {result.get('model', 'unknown')}",
+                    llm_provider=result["provider"]
+                )
+        except Exception as e:
+            print(f"Provider {provider_name} failed: {e}")
+            continue
+    
+    # Fallback to local processing
+    fallback_answer = generate_fallback_answer(question, relevant_chunks)
+    return AnswerResponse(
+        answer=fallback_answer,
+        confidence_score=0.5,
+        relevant_chunks=relevant_chunks,
+        reasoning="Answer generated using local text processing as all LLM providers were unavailable",
+        llm_provider="local_fallback"
+    )
     """Generate answer using multiple LLM providers with fallback."""
     if not relevant_chunks:
         return AnswerResponse(
@@ -1056,12 +1319,8 @@ async def run_submissions(request_body: RunRequest, request: Request):
         answers = []
         
         for question in request_body.questions:
-            # Always try vector search first for better semantic matching
-            relevant_chunks = await vector_search(document_text, [question], use_vector_db=True)
-            
-            # Generate answer with LLM fallback
-            detailed_response = await generate_answer_with_fallback(question, relevant_chunks)
-            
+            # Use LangChain-powered answer generation
+            detailed_response = await generate_answer_with_langchain(question, document_text)
             answers.append(detailed_response.answer)
         
         return RunResponse(
