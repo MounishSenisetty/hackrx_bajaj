@@ -49,7 +49,7 @@ class Config:
     CHUNK_SIZE = 500
     CHUNK_OVERLAP = 100
     MAX_CHUNKS = 10
-    TOP_K_CHUNKS = 3
+    TOP_K_CHUNKS = 5
     
     REQUEST_TIMEOUT = 30.0
     MAX_DOCUMENT_SIZE = 10 * 1024 * 1024
