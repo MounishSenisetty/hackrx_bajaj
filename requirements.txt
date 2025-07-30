@@ -2,10 +2,5 @@ fastapi
 httpx
 pydantic
 PyPDF2
-numpy==1.24.3
 sentence-transformers
-torch
-transformers
-huggingface_hub
-setuptools
 
