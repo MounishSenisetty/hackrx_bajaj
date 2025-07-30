@@ -1,4 +1,11 @@
-fastapi==0.104.1
-httpx==0.25.2
-pydantic==2.5.2
-PyPDF2==3.0.1
+fastapi
+httpx
+pydantic
+PyPDF2
+numpy
+sentence-transformers
+torch
+transformers
+huggingface_hub
+vercel-cli
+

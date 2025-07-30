@@ -13,9 +13,17 @@ import math
 from datetime import datetime
 from typing import List, Dict, Any
 
+
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field
+# LangChain imports
+from langchain.embeddings import HuggingFaceEmbeddings
+from langchain.llms import HuggingFaceHub
+from langchain.vectorstores import FAISS
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
 
 # Try to import numpy, but provide fallback
 try:
@@ -31,19 +39,21 @@ try:
 except ImportError:
     PDF_AVAILABLE = False
 
+# Sentence Transformer for local embeddings
+try:
+    from sentence_transformers import SentenceTransformer
+    SENTENCE_TRANSFORMER_AVAILABLE = True
+except ImportError:
+    SENTENCE_TRANSFORMER_AVAILABLE = False
+
 app = FastAPI(title="RAG Document Query System", version="5.0.0")
 
 # Configuration
 class Config:
     BEARER_TOKEN = os.getenv("BEARER_TOKEN", "ca6914a6c8df9d1ce075149c3ab9f060e666c75940576e37a98b3cf0e9092c72")
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
     HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
     
-    OPENAI_MODEL = "gpt-3.5-turbo"
-    OPENAI_EMBEDDING_MODEL = "text-embedding-ada-002"
-    ANTHROPIC_MODEL = "claude-3-haiku-20240307"
-    HUGGINGFACE_MODEL = "google/flan-t5-large"
+    HUGGINGFACE_MODEL = "google/flan-t5-base"
     HUGGINGFACE_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
     
     CHUNK_SIZE = 500
@@ -55,6 +65,19 @@ class Config:
     MAX_DOCUMENT_SIZE = 10 * 1024 * 1024
     
     DB_FILE = "/tmp/document_embeddings.db"
+
+
+# LangChain Embeddings and LLM setup
+embedding_model = HuggingFaceEmbeddings(
+    model_name=Config.HUGGINGFACE_EMBEDDING_MODEL,
+    model_kwargs={"device": "cpu"}
+)
+
+llm = HuggingFaceHub(
+    repo_id=Config.HUGGINGFACE_MODEL,
+    huggingfacehub_api_token=Config.HUGGINGFACE_API_KEY,
+    model_kwargs={"max_new_tokens": 250}
+)
 
 # Vector Database
 class VectorDB:
@@ -153,7 +176,7 @@ class RunResponse(BaseModel):
 # Document Processing
 async def fetch_document(url: str) -> str:
     try:
-        async with httpx.AsyncClient(timeout=Config.REQUEST_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=Config.REQUEST_TIMEOUT, follow_redirects=True) as client:
             response = await client.get(url)
             response.raise_for_status()
             content = response.content
@@ -230,38 +253,10 @@ def smart_chunk_text(text: str) -> List[str]:
         overlapped_chunks.append(overlap.strip() + " " + chunks[i])
     return overlapped_chunks[:Config.MAX_CHUNKS]
 
-# Embeddings
-async def get_embeddings(texts: List[str]) -> List[List[float]]:
-    if Config.OPENAI_API_KEY:
-        try:
-            return await get_openai_embeddings(texts)
-        except Exception as e:
-            print(f"OpenAI embeddings failed: {e}")
-    if Config.HUGGINGFACE_API_KEY:
-        try:
-            return await get_huggingface_embeddings(texts)
-        except Exception as e:
-            print(f"HuggingFace embeddings failed: {e}")
-    return create_simple_embeddings(texts)
 
-async def get_openai_embeddings(texts: List[str]) -> List[List[float]]:
-    async with httpx.AsyncClient() as client:
-        response = await client.post("https://api.openai.com/v1/embeddings",
-            headers={"Authorization": f"Bearer {Config.OPENAI_API_KEY}", "Content-Type": "application/json"},
-            json={"model": Config.OPENAI_EMBEDDING_MODEL, "input": texts}, timeout=30.0)
-        response.raise_for_status()
-        return [item["embedding"] for item in response.json()["data"]]
-
-async def get_huggingface_embeddings(texts: List[str]) -> List[List[float]]:
-    async with httpx.AsyncClient() as client:
-        response = await client.post(f"https://api-inference.huggingface.co/pipeline/feature-extraction/{Config.HUGGINGFACE_EMBEDDING_MODEL}",
-            headers={"Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}", "Content-Type": "application/json"},
-            json={"inputs": texts, "options": {"wait_for_model": True}}, timeout=30.0)
-        response.raise_for_status()
-        result = response.json()
-        if isinstance(result, list) and result and isinstance(result[0], list):
-            return result
-        raise Exception("Unexpected embedding format from HuggingFace")
+# LangChain Embedding function
+def get_langchain_embeddings(texts: List[str]) -> List[List[float]]:
+    return embedding_model.embed_documents(texts)
 
 def create_simple_embeddings(texts: List[str]) -> List[List[float]]:
     keywords = ['prime', 'minister', 'health', 'family', 'welfare', 'waiting', 'period', 'days', 'months', 'maternity', 'pregnancy', 'coverage', 'benefit', 'cataract', 'surgery', 'treatment', 'organ', 'donor', 'hospital', 'ayush', 'room', 'rent', 'discount', 'claim', 'ncd', 'check', 'up', 'define', 'means', 'policy', 'sum', 'insured', 'premium', 'deductible']
@@ -276,100 +271,61 @@ def create_simple_embeddings(texts: List[str]) -> List[List[float]]:
         embedding = [0.0] * len(vocab)
         for word in words:
             if word in vocab:
-                embedding[vocab.index(word)] += (3.0 if word in keywords else 1.0) / len(words)
+                embedding[vocab.index(word)] += (3.0 if word in keywords else 1.0) / (len(words) + 1e-6)
         mag = math.sqrt(sum(x*x for x in embedding))
         if mag > 0:
             embedding = [x / mag for x in embedding]
         embeddings.append(embedding)
     return embeddings
 
-# RAG Pipeline
-async def process_document_for_rag(document_text: str) -> str:
-    document_hash = hashlib.md5(document_text.encode()).hexdigest()
-    if vector_db.document_exists(document_hash):
-        return document_hash
-    chunks = smart_chunk_text(document_text)
-    embeddings = await get_embeddings(chunks)
-    vector_db.store_chunks(document_hash, chunks, embeddings)
-    return document_hash
 
-async def call_llm_api(question: str, context_chunks: List[Dict[str, Any]], provider: str) -> Dict[str, Any]:
-    context = "\n\n".join([f"[Relevance: {c['similarity']:.3f}] {c['content']}" for c in context_chunks])
-    prompt = f"Based on the context below, answer the question.\n\nCONTEXT:\n{context}\n\nQUESTION: {question}\n\nANSWER:"
-    
-    if provider == "OpenAI" and Config.OPENAI_API_KEY:
-        url, model, key = "https://api.openai.com/v1/chat/completions", Config.OPENAI_MODEL, Config.OPENAI_API_KEY
-        payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "max_tokens": 200, "temperature": 0.1}
-    elif provider == "Anthropic" and Config.ANTHROPIC_API_KEY:
-        url, model, key = "https://api.anthropic.com/v1/messages", Config.ANTHROPIC_MODEL, Config.ANTHROPIC_API_KEY
-        payload = {"model": model, "max_tokens": 200, "messages": [{"role": "user", "content": prompt}]}
-    elif provider == "HuggingFace" and Config.HUGGINGFACE_API_KEY:
-        url, model, key = f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}", None, Config.HUGGINGFACE_API_KEY
-        payload = {"inputs": prompt, "parameters": {"max_new_tokens": 150, "return_full_text": False}}
-    else:
-        return {"success": False, "error": f"{provider} API key not available"}
+# LangChain RAG Pipeline
+def process_document_for_rag(document_text: str):
+    # Use LangChain's text splitter
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=Config.CHUNK_SIZE,
+        chunk_overlap=Config.CHUNK_OVERLAP
+    )
+    docs = text_splitter.create_documents([document_text])
+    # Create FAISS vector store
+    vectorstore = FAISS.from_documents(docs, embedding_model)
+    return vectorstore
 
-    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    if provider == "Anthropic":
-        headers.update({"x-api-key": key, "anthropic-version": "2023-06-01"})
 
+def get_qa_chain(vectorstore):
+    # Custom prompt (optional, can use default)
+    prompt_template = (
+        "You are an expert Q&A assistant. Your goal is to provide accurate and helpful answers. "
+        "Please follow these instructions carefully:\n"
+        "1. Analyze the user's QUESTION and the provided CONTEXT snippets.\n"
+        "2. Synthesize an answer based *primarily* on the information in the CONTEXT.\n"
+        "3. If the CONTEXT does not contain enough information to answer the question, "
+        "use your general knowledge to provide a helpful response.\n"
+        "4. If you use your general knowledge, you MUST begin your answer with the phrase: "
+        "'Based on my general knowledge, as the document does not contain specific details on this topic...'\n\n"
+        "CONTEXT:\n---\n{context}\n---\n\n"
+        "QUESTION: {question}\n\n"
+        "ANSWER:"
+    )
+    PROMPT = PromptTemplate(
+        template=prompt_template,
+        input_variables=["context", "question"]
+    )
+    return RetrievalQA.from_chain_type(
+        llm=llm,
+        chain_type="stuff",
+        retriever=vectorstore.as_retriever(),
+        chain_type_kwargs={"prompt": PROMPT}
+    )
+
+
+def generate_rag_answer(question: str, vectorstore) -> str:
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, headers=headers, json=payload, timeout=25.0)
-            response.raise_for_status()
-            result = response.json()
-            
-            if provider == "OpenAI":
-                answer = result["choices"][0]["message"]["content"]
-            elif provider == "Anthropic":
-                answer = result["content"][0]["text"]
-            else: # HuggingFace
-                answer = result[0]["generated_text"] if isinstance(result, list) else str(result)
-            
-            return {"answer": answer.strip(), "success": True}
+        qa_chain = get_qa_chain(vectorstore)
+        result = qa_chain({"query": question})
+        return result["result"]
     except Exception as e:
-        return {"success": False, "error": str(e)}
-
-def extract_answer_from_chunks(question: str, context_chunks: List[Dict[str, Any]]) -> str:
-    if not context_chunks:
-        return "No relevant information found."
-    
-    full_context = " ".join([c['content'] for c in context_chunks])
-    sentences = re.split(r'(?<=[.!?])\s+', full_context)
-    question_lower = question.lower()
-    
-    best_sentence, max_score = "", 0
-    question_words = set(re.findall(r'\w{4,}', question_lower))
-
-    for sentence in sentences:
-        sentence_lower = sentence.lower()
-        if any(skip in sentence_lower for skip in ['national insurance', 'uin:', 'cin -', 'page']):
-            continue
-        
-        score = len(question_words.intersection(set(re.findall(r'\w+', sentence_lower))))
-        if score > max_score:
-            max_score = score
-            best_sentence = sentence.strip()
-            
-    return best_sentence + "." if max_score > 1 else "Could not find a specific answer in the document."
-
-async def generate_rag_answer(question: str, document_hash: str) -> str:
-    try:
-        question_embedding = (await get_embeddings([question]))[0]
-        similar_chunks = vector_db.get_similar_chunks(document_hash, question_embedding)
-        
-        if not similar_chunks:
-            return "No relevant information found."
-        
-        for provider in ["OpenAI", "Anthropic", "HuggingFace"]:
-            result = await call_llm_api(question, similar_chunks, provider)
-            if result.get("success"):
-                return result["answer"]
-            print(f"{provider} failed: {result.get('error')}")
-        
-        return extract_answer_from_chunks(question, similar_chunks)
-    except Exception as e:
-        print(f"RAG answer generation failed: {e}")
+        print(f"LangChain RAG answer generation failed: {e}")
         return "Error processing the question."
 
 # API Endpoints
@@ -377,19 +333,17 @@ async def generate_rag_answer(question: str, document_hash: str) -> str:
 async def root():
     return {"message": "Document Query System is running"}
 
+
 @app.post("/hackrx/run", response_model=RunResponse)
 async def run_submissions(req: RunRequest, http_req: Request):
     if http_req.headers.get("Authorization") != f"Bearer {Config.BEARER_TOKEN}":
         raise HTTPException(403, "Invalid Bearer token")
-    
     try:
         doc_text = await fetch_document(req.documents)
         if not doc_text or len(doc_text.strip()) < 10:
             raise HTTPException(400, "Failed to extract content from document")
-        
-        doc_hash = await process_document_for_rag(doc_text)
-        answers = [await generate_rag_answer(q, doc_hash) for q in req.questions]
-        
+        vectorstore = process_document_for_rag(doc_text)
+        answers = [generate_rag_answer(q, vectorstore) for q in req.questions]
         return RunResponse(answers=answers)
     except HTTPException as he:
         raise he
