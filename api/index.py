@@ -1,5 +1,5 @@
 """
-Ultra-minimal API for testing Vercel deployment
+Ultra-minimal API for testing Vercel deployment with new Gemini API key
 """
 
 from fastapi import FastAPI, Request, HTTPException
@@ -36,8 +36,8 @@ async def run_submissions(request_body: RunRequest, request: Request):
     if provided_token != "ca6914a6c8df9d1ce075149c3ab9f060e666c75940576e37a98b3cf0e9092c72":
         raise HTTPException(status_code=403, detail="Invalid Bearer token")
     
-    # Simple response
-    answers = [f"This is a test response for question: {q}" for q in request_body.questions]
+    # Simple response indicating the new API key is configured
+    answers = [f"Test response with new API key for: {q}" for q in request_body.questions]
     
     return RunResponse(
         answers=answers,
@@ -46,9 +46,10 @@ async def run_submissions(request_body: RunRequest, request: Request):
             "questions_processed": len(request_body.questions),
             "timestamp": datetime.now().isoformat(),
             "version": "ultra-minimal",
-            "api_key_updated": "AIzaSyCtvejhRMKy3NJlhu42j0LgE2td8kuUQ5o"
+            "gemini_api_key_updated": "AIzaSyCtvejhRMKy3NJlhu42j0LgE2td8kuUQ5o",
+            "status": "successfully_deployed_with_new_key"
         }
     )
 
-# Vercel handler
-handler = app
+# For Vercel
+app = app
