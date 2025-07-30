@@ -44,10 +44,10 @@ An advanced document processing and query-retrieval system that leverages Large 
 
 ### Core Technologies
 - **Backend**: FastAPI (Python 3.8+)
-- **Vector Database**: FAISS (Facebook AI Similarity Search)
-- **Embeddings**: SentenceTransformers (all-MiniLM-L6-v2)
-- **Document Processing**: PyPDF2, python-docx
-- **LLM APIs**: OpenAI GPT-4, Google Gemini
+- **Document Processing**: PyPDF2, httpx
+- **LLM APIs**: OpenAI GPT-3.5-turbo, Anthropic Claude-3-haiku, HuggingFace Mixtral-8x7B
+- **Deployment**: Vercel Serverless
+- **Authentication**: Bearer Token Security
 
 ### Performance Metrics
 - **Latency**: < 5 seconds for typical queries
