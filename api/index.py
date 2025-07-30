@@ -1,5 +1,5 @@
 """
-LangChain-Powered Document Query System with Natural LLM Processing
+Document Query System with LangChain Integration
 """
 
 import os
@@ -45,7 +45,7 @@ except ImportError:
         VECTOR_DB_AVAILABLE = False
     LANGCHAIN_AVAILABLE = False
 
-app = FastAPI(title="LangChain Natural Document Query System", version="4.0.0")
+app = FastAPI(title="Document Query System", version="4.0.0")
 
 # Configuration
 class Config:
@@ -67,7 +67,6 @@ class Config:
     CHUNK_OVERLAP = 32  # Reduced overlap
     MAX_RELEVANT_CHUNKS = 3  # Fewer but more relevant chunks
     SIMILARITY_THRESHOLD = 0.2  # Lower threshold for more results
-    MIN_VECTOR_DB_SIZE = 1000  # Use vector DB for documents > 1KB (almost all documents)
     
     REQUEST_TIMEOUT = 30.0
     MAX_DOCUMENT_SIZE = 50 * 1024 * 1024  # Increased to 50MB for large documents
@@ -77,6 +76,7 @@ class LangChainDocumentProcessor:
     """LangChain-powered document processing with vector search capabilities."""
     
     def __init__(self):
+        global LANGCHAIN_AVAILABLE
         self.vectorstore = None
         self.text_splitter = None
         self.embeddings = None
@@ -103,7 +103,6 @@ class LangChainDocumentProcessor:
                 
             except Exception as e:
                 print(f"Failed to initialize LangChain components: {e}")
-                global LANGCHAIN_AVAILABLE
                 LANGCHAIN_AVAILABLE = False
     
     async def process_document(self, text: str) -> List[Document]:
@@ -204,13 +203,6 @@ class LangChainDocumentProcessor:
 class RunRequest(BaseModel):
     documents: str = Field(..., description="URL to document")
     questions: List[str] = Field(..., description="Questions")
-
-class AnswerResponse(BaseModel):
-    answer: str = Field(..., description="Answer")
-    confidence_score: float = Field(..., description="Confidence score")
-    relevant_chunks: List[Dict[str, Any]] = Field(..., description="Relevant chunks")
-    reasoning: str = Field(..., description="Reasoning")
-    llm_provider: str = Field(..., description="LLM provider used")
 
 class RunResponse(BaseModel):
     answers: List[str] = Field(..., description="List of answers corresponding to the input questions")
@@ -757,26 +749,13 @@ Answer:"""
             )
             
             answer = result.get("result", "").strip()
-            source_docs = result.get("source_documents", [])
-            
-            # Convert source documents to our format
-            relevant_chunks = []
-            for doc in source_docs:
-                chunk = {
-                    'text': doc.page_content,
-                    'metadata': doc.metadata.copy(),
-                    'score': 0.8  # LangChain doesn't return scores in RetrievalQA
-                }
-                relevant_chunks.append(chunk)
-            
             provider_used = "openai" if self.openai_llm else "anthropic"
             
             return {
                 "answer": answer,
                 "provider": f"langchain_{provider_used}",
                 "model": Config.OPENAI_MODEL if self.openai_llm else Config.ANTHROPIC_MODEL,
-                "success": True,
-                "relevant_chunks": relevant_chunks
+                "success": True
             }
             
         except Exception as e:
@@ -1101,7 +1080,7 @@ def generate_fallback_answer(question: str, relevant_chunks: List[Dict[str, Any]
     
     return "The requested information is available in the document but requires more specific context."
 
-async def generate_answer_with_langchain(question: str, document_text: str) -> AnswerResponse:
+async def generate_answer_with_langchain(question: str, document_text: str) -> str:
     """Generate answer using LangChain's advanced capabilities."""
     try:
         if LANGCHAIN_AVAILABLE:
@@ -1123,13 +1102,7 @@ async def generate_answer_with_langchain(question: str, document_text: str) -> A
             try:
                 result = await llm_provider.query_with_langchain(question, processor.vectorstore)
                 if result.get("success"):
-                    return AnswerResponse(
-                        answer=result["answer"],
-                        confidence_score=0.9,
-                        relevant_chunks=result.get("relevant_chunks", []),
-                        reasoning=f"Answer generated using {result['provider']} with LangChain RetrievalQA",
-                        llm_provider=result["provider"]
-                    )
+                    return result["answer"]
             except Exception as e:
                 print(f"LangChain RetrievalQA failed: {e}")
             
@@ -1147,26 +1120,13 @@ async def generate_answer_with_langchain(question: str, document_text: str) -> A
                     try:
                         result = await provider_func(question, context)
                         if result.get("success"):
-                            return AnswerResponse(
-                                answer=result["answer"],
-                                confidence_score=0.8,
-                                relevant_chunks=search_results,
-                                reasoning=f"Answer generated using {result['provider']} with LangChain similarity search",
-                                llm_provider=f"langchain_{result['provider']}"
-                            )
+                            return result["answer"]
                     except Exception as e:
                         print(f"Provider {provider_name} failed: {e}")
                         continue
                 
                 # Final fallback to local processing
-                fallback_answer = generate_fallback_answer(question, search_results)
-                return AnswerResponse(
-                    answer=fallback_answer,
-                    confidence_score=0.6,
-                    relevant_chunks=search_results,
-                    reasoning="Answer generated using LangChain similarity search + local text processing",
-                    llm_provider="langchain_local_fallback"
-                )
+                return generate_fallback_answer(question, search_results)
         
         # Complete fallback when LangChain is not available
         relevant_chunks = await langchain_vector_search(document_text, [question])
@@ -1178,16 +1138,10 @@ async def generate_answer_with_langchain(question: str, document_text: str) -> A
         relevant_chunks = await langchain_vector_search(document_text, [question])
         return await generate_answer_with_fallback(question, relevant_chunks)
 
-async def generate_answer_with_fallback(question: str, relevant_chunks: List[Dict[str, Any]]) -> AnswerResponse:
+async def generate_answer_with_fallback(question: str, relevant_chunks: List[Dict[str, Any]]) -> str:
     """Generate answer using multiple LLM providers with fallback."""
     if not relevant_chunks:
-        return AnswerResponse(
-            answer="No relevant information found in the document.",
-            confidence_score=0.0,
-            relevant_chunks=[],
-            reasoning="No relevant content found for the question.",
-            llm_provider="none"
-        )
+        return "No relevant information found in the document."
     
     context = " ".join([chunk['text'] for chunk in relevant_chunks])
     
@@ -1202,99 +1156,36 @@ async def generate_answer_with_fallback(question: str, relevant_chunks: List[Dic
         try:
             result = await provider_func(question, context)
             if result.get("success"):
-                return AnswerResponse(
-                    answer=result["answer"],
-                    confidence_score=0.8,
-                    relevant_chunks=relevant_chunks,
-                    reasoning=f"Answer generated using {result['provider']} model {result.get('model', 'unknown')}",
-                    llm_provider=result["provider"]
-                )
+                return result["answer"]
         except Exception as e:
             print(f"Provider {provider_name} failed: {e}")
             continue
     
     # Fallback to local processing
-    fallback_answer = generate_fallback_answer(question, relevant_chunks)
-    return AnswerResponse(
-        answer=fallback_answer,
-        confidence_score=0.5,
-        relevant_chunks=relevant_chunks,
-        reasoning="Answer generated using local text processing as all LLM providers were unavailable",
-        llm_provider="local_fallback"
-    )
-    """Generate answer using multiple LLM providers with fallback."""
-    if not relevant_chunks:
-        return AnswerResponse(
-            answer="No relevant information found in the document.",
-            confidence_score=0.0,
-            relevant_chunks=[],
-            reasoning="No relevant content found for the question.",
-            llm_provider="none"
-        )
-    
-    context = " ".join([chunk['text'] for chunk in relevant_chunks])
-    
-    # Try LLM providers in order: OpenAI -> Anthropic -> Hugging Face -> Local fallback
-    llm_providers = [
-        ("openai", call_openai),
-        ("anthropic", call_anthropic),
-        ("huggingface", call_huggingface)
-    ]
-    
-    for provider_name, provider_func in llm_providers:
-        try:
-            result = await provider_func(question, context)
-            if result.get("success"):
-                return AnswerResponse(
-                    answer=result["answer"],
-                    confidence_score=0.8,
-                    relevant_chunks=relevant_chunks,
-                    reasoning=f"Answer generated using {result['provider']} model {result.get('model', 'unknown')}",
-                    llm_provider=result["provider"]
-                )
-        except Exception as e:
-            print(f"Provider {provider_name} failed: {e}")
-            continue
-    
-    # Fallback to local processing
-    fallback_answer = generate_fallback_answer(question, relevant_chunks)
-    return AnswerResponse(
-        answer=fallback_answer,
-        confidence_score=0.5,
-        relevant_chunks=relevant_chunks,
-        reasoning="Answer generated using local text processing as all LLM providers were unavailable",
-        llm_provider="local_fallback"
-    )
+    return generate_fallback_answer(question, relevant_chunks)
 
 # API Endpoints
 @app.get("/")
 async def root():
     return {
-        "message": "Multi-LLM Query System",
+        "message": "LangChain Document Query System",
         "status": "operational",
-        "available_providers": ["openai", "anthropic", "huggingface", "local_fallback"],
+        "endpoint": "/hackrx/run",
         "timestamp": datetime.now().isoformat()
     }
 
 @app.get("/health")
 async def health():
-    # Check which LLM providers are available
-    providers_status = {
-        "openai": bool(Config.OPENAI_API_KEY),
-        "anthropic": bool(Config.ANTHROPIC_API_KEY),
-        "huggingface": bool(Config.HUGGINGFACE_API_KEY),
-        "local_fallback": True
-    }
-    
     return {
         "status": "healthy",
-        "providers_available": providers_status,
+        "langchain_available": LANGCHAIN_AVAILABLE,
+        "pdf_support": PDF_AVAILABLE,
         "timestamp": datetime.now().isoformat()
     }
 
 @app.post("/hackrx/run", response_model=RunResponse)
 async def run_submissions(request_body: RunRequest, request: Request):
-    """Main API endpoint with multi-LLM support."""
+    """Main API endpoint for document-based question answering."""
     
     # Authentication
     auth_header = request.headers.get("Authorization")
@@ -1312,16 +1203,13 @@ async def run_submissions(request_body: RunRequest, request: Request):
         if not document_text or len(document_text.strip()) < 10:
             raise HTTPException(400, "Could not extract meaningful content from document")
         
-        # Always use vector database for better accuracy (when available)
-        # For smaller documents, still use vector DB if available for better semantic search
-        
-        # Process questions
+        # Process questions and generate answers
         answers = []
         
         for question in request_body.questions:
             # Use LangChain-powered answer generation
-            detailed_response = await generate_answer_with_langchain(question, document_text)
-            answers.append(detailed_response.answer)
+            answer = await generate_answer_with_langchain(question, document_text)
+            answers.append(answer)
         
         return RunResponse(
             answers=answers

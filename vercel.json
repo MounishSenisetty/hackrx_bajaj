@@ -15,10 +15,6 @@
       "dest": "/api/index.py"
     },
     {
-      "src": "/system/info",
-      "dest": "/api/index.py"
-    },
-    {
       "src": "/(.*)",
       "dest": "/api/index.py"
     }
