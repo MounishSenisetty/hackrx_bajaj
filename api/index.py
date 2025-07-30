@@ -44,9 +44,7 @@ class AnswerResponse(BaseModel):
     llm_provider: str = Field(..., description="LLM provider used")
 
 class RunResponse(BaseModel):
-    answers: List[str] = Field(..., description="Answers")
-    detailed_responses: Optional[List[AnswerResponse]] = Field(None, description="Detailed responses")
-    processing_stats: Dict[str, Any] = Field(..., description="Processing stats")
+    answers: List[str] = Field(..., description="List of answers corresponding to the input questions")
 
 # Document Processing
 async def fetch_document(url: str) -> str:
@@ -60,50 +58,128 @@ async def fetch_document(url: str) -> str:
             if len(content) > Config.MAX_DOCUMENT_SIZE:
                 raise HTTPException(400, "Document exceeds size limit")
             
-            # Simple text extraction
+            # Handle PDF content - try to extract text
             try:
-                return content.decode('utf-8', errors='ignore')
-            except:
+                # For PDFs, we'll decode and clean the content as best we can
+                text = content.decode('utf-8', errors='ignore')
+                
+                # Clean up common PDF artifacts
+                text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\xff]', ' ', text)
+                text = re.sub(r'\s+', ' ', text)
+                text = text.strip()
+                
+                if len(text) < 100:  # Very short text might indicate poor extraction
+                    # Try latin-1 encoding for PDFs
+                    text = content.decode('latin-1', errors='ignore')
+                    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', ' ', text)
+                    text = re.sub(r'\s+', ' ', text)
+                    text = text.strip()
+                
+                return text if text else "Document content could not be decoded"
+                
+            except Exception:
                 return "Document content could not be decoded"
                 
     except Exception as e:
         raise HTTPException(500, f"Document fetch failed: {str(e)}")
 
 def chunk_text(text: str) -> List[Dict[str, Any]]:
-    """Simple text chunking."""
-    chunk_size = 800
+    """Smart text chunking for policy documents."""
+    chunk_size = 1000  # Larger chunks for better context
+    overlap = 200
     chunks = []
-    words = text.split()
     
-    for i in range(0, len(words), chunk_size):
-        chunk_words = words[i:i + chunk_size]
-        chunk_text = ' '.join(chunk_words)
+    # First, try to split by paragraphs or sections
+    paragraphs = re.split(r'\n\s*\n', text)
+    
+    # If we have good paragraph structure, use that
+    if len(paragraphs) > 5:
+        current_chunk = ""
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+                
+            # If adding this paragraph would exceed chunk size, save current chunk
+            if len(current_chunk) + len(para) > chunk_size and current_chunk:
+                chunks.append({
+                    'text': current_chunk.strip(),
+                    'score': 0.5,
+                    'metadata': {'chunk_id': len(chunks), 'type': 'paragraph'}
+                })
+                # Start new chunk with overlap
+                current_chunk = current_chunk[-overlap:] + " " + para
+            else:
+                current_chunk += " " + para if current_chunk else para
         
-        chunks.append({
-            'text': chunk_text,
-            'score': 0.5,
-            'metadata': {'chunk_id': len(chunks)}
-        })
+        # Add the last chunk
+        if current_chunk.strip():
+            chunks.append({
+                'text': current_chunk.strip(),
+                'score': 0.5,
+                'metadata': {'chunk_id': len(chunks), 'type': 'paragraph'}
+            })
+    
+    # Fallback to word-based chunking if paragraph approach doesn't work well
+    if len(chunks) < 3:
+        chunks = []
+        words = text.split()
+        
+        for i in range(0, len(words), chunk_size - overlap):
+            chunk_words = words[i:i + chunk_size]
+            chunk_text = ' '.join(chunk_words)
+            
+            chunks.append({
+                'text': chunk_text,
+                'score': 0.5,
+                'metadata': {'chunk_id': len(chunks), 'type': 'word_based'}
+            })
     
     return chunks
 
 def simple_search(query: str, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Simple keyword-based search."""
+    """Enhanced keyword-based search for policy documents."""
     query_words = set(re.findall(r'\w+', query.lower()))
     scored_chunks = []
     
+    # Keywords that indicate important policy information
+    policy_keywords = {
+        'grace period', 'waiting period', 'maternity', 'cataract', 'organ donor', 
+        'claim discount', 'health check', 'hospital', 'ayush', 'room rent', 'icu',
+        'premium', 'coverage', 'benefit', 'policy', 'insured', 'treatment'
+    }
+    
     for chunk in chunks:
-        chunk_words = set(re.findall(r'\w+', chunk['text'].lower()))
-        overlap = len(query_words.intersection(chunk_words))
+        chunk_text_lower = chunk['text'].lower()
+        chunk_words = set(re.findall(r'\w+', chunk_text_lower))
         
-        if overlap > 0:
-            score = overlap / len(query_words)
+        # Basic keyword overlap score
+        overlap = len(query_words.intersection(chunk_words))
+        base_score = overlap / len(query_words) if query_words else 0
+        
+        # Boost score for policy-relevant terms
+        policy_boost = 0
+        for keyword in policy_keywords:
+            if keyword in chunk_text_lower:
+                policy_boost += 0.1
+        
+        # Boost score for exact phrase matches
+        phrase_boost = 0
+        query_text = query.lower()
+        if len(query_text) > 10 and query_text in chunk_text_lower:
+            phrase_boost = 0.3
+        
+        # Calculate final score
+        final_score = base_score + policy_boost + phrase_boost
+        
+        if final_score > 0 or overlap > 0:
             chunk_copy = chunk.copy()
-            chunk_copy['score'] = score
+            chunk_copy['score'] = final_score
             scored_chunks.append(chunk_copy)
     
+    # Sort by score and return top 5 for better context
     scored_chunks.sort(key=lambda x: x['score'], reverse=True)
-    return scored_chunks[:3]
+    return scored_chunks[:5]
 
 # LLM Providers
 async def call_openai(question: str, context: str) -> Dict[str, Any]:
@@ -385,8 +461,6 @@ async def health():
 @app.post("/hackrx/run", response_model=RunResponse)
 async def run_submissions(request_body: RunRequest, request: Request):
     """Main API endpoint with multi-LLM support."""
-    import time
-    start_time = time.time()
     
     # Authentication
     auth_header = request.headers.get("Authorization")
@@ -409,7 +483,6 @@ async def run_submissions(request_body: RunRequest, request: Request):
         
         # Process questions
         answers = []
-        detailed_responses = []
         
         for question in request_body.questions:
             # Search for relevant chunks
@@ -419,24 +492,9 @@ async def run_submissions(request_body: RunRequest, request: Request):
             detailed_response = await generate_answer_with_fallback(question, relevant_chunks)
             
             answers.append(detailed_response.answer)
-            detailed_responses.append(detailed_response)
-        
-        # Statistics
-        processing_time = time.time() - start_time
-        stats = {
-            "processing_time_seconds": round(processing_time, 2),
-            "document_length": len(document_text),
-            "total_chunks": len(chunks),
-            "questions_processed": len(request_body.questions),
-            "environment": "vercel_multi_llm",
-            "providers_attempted": [resp.llm_provider for resp in detailed_responses],
-            "timestamp": datetime.now().isoformat()
-        }
         
         return RunResponse(
-            answers=answers,
-            detailed_responses=detailed_responses,
-            processing_stats=stats
+            answers=answers
         )
         
     except HTTPException:
