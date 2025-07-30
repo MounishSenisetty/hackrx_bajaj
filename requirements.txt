@@ -7,4 +7,5 @@ sentence-transformers
 torch
 transformers
 huggingface_hub
+setuptools
 
