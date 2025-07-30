@@ -2,33 +2,35 @@
 
 ## 🎯 Overview
 
-An advanced document processing and query-retrieval system that leverages Large Language Models (LLMs) and semantic search to provide intelligent, contextual answers from complex documents. Designed for real-world scenarios in insurance, legal, HR, and compliance domains.
+An advanced document processing and query-retrieval system that leverages Large Language Models (LLMs) and intelligent text processing to provide accurate, contextual answers from any type of PDF document. Works with insurance policies, research papers, contracts, manuals, reports, and any other PDF document type.
 
 ## 🏗️ System Architecture
 
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│  Input Documents │───▶│   LLM Parser     │───▶│ Embedding Search│
-│  (PDF/DOCX/Email)│    │ Extract Structure│    │  (FAISS Vector) │
+│  Input Documents │───▶│   PDF Parser     │───▶│ Smart Chunking  │
+│  (Any PDF Type) │    │ PyPDF2 Extract   │    │ Adaptive Strategy│
 └─────────────────┘    └──────────────────┘    └─────────────────┘
                                                           │
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   JSON Output   │◀───│ Logic Evaluation │◀───│ Clause Matching │
-│ Structured Resp │    │Decision Processing│    │Semantic Similar │
+│   JSON Output   │◀───│ Multi-LLM Chain  │◀───│ Semantic Search │
+│ Structured Resp │    │OpenAI→Claude→HF  │    │Pattern Matching │
 └─────────────────┘    └──────────────────┘    └─────────────────┘
 ```
 
 ## 🚀 Key Features
 
 ### 📄 Document Processing
-- **Multi-format Support**: PDF, DOCX, Email (.eml), Plain Text
-- **Intelligent Parsing**: Automatic content extraction based on file type
-- **Large Document Handling**: Efficient processing of documents up to 50MB
+- **Universal PDF Support**: Works with any PDF document type - policies, research papers, manuals, contracts, reports
+- **Intelligent Text Extraction**: PyPDF2-powered extraction with fallback mechanisms
+- **Adaptive Chunking**: Automatically detects document structure (sections, paragraphs, sentences)
+- **Large Document Handling**: Efficient processing of documents up to 10MB
 
 ### 🔍 Advanced Search & Retrieval
-- **Semantic Search**: FAISS-powered vector similarity search
-- **Contextual Chunking**: Overlapping text windows for better context preservation
-- **Relevance Scoring**: Confidence-based ranking of retrieved information
+- **Intelligent Search**: Context-aware keyword matching with phrase detection
+- **Multi-Strategy Chunking**: Section-based, paragraph-based, and sentence-based chunking
+- **Relevance Scoring**: Dynamic scoring based on content type and question pattern
+- **Generic Pattern Matching**: Works across document types with adaptive algorithms
 
 ### 🤖 LLM Integration
 - **Multi-LLM Support**: OpenAI GPT-4, Google Gemini fallback
