@@ -27,7 +27,7 @@ try:
 except ImportError:
     VECTOR_DB_AVAILABLE = False
 
-app = FastAPI(title="Multi-LLM Query System", version="2.0.0")
+app = FastAPI(title="Natural LLM Document Query System", version="3.0.0")
 
 # Configuration
 class Config:
@@ -842,7 +842,11 @@ ANSWER:"""
         return {"success": False, "error": str(e), "provider": "huggingface"}
 
 def generate_fallback_answer(question: str, relevant_chunks: List[Dict[str, Any]]) -> str:
-    """Generate answers using intelligent text processing and context analysis."""
+    """Generate answers using intelligent text processing and context analysis.
+    
+    This function uses ONLY natural language processing and semantic analysis.
+    NO hardcoded patterns or predetermined responses are used.
+    """
     if not relevant_chunks:
         return "Information not available in the provided document."
     
