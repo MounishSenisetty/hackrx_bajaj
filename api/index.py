@@ -35,6 +35,8 @@ app = FastAPI(
 # Configuration for serverless environment
 class Config:
     BEARER_TOKEN = "ca6914a6c8df9d1ce075149c3ab9f060e666c75940576e37a98b3cf0e9092c72"
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBBi1RQgXXxh4CvbByxAdTB9yhZqxIqyBQ")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
     MAX_CHUNK_SIZE = 800  # Reduced for serverless
     CHUNK_OVERLAP = 150
     MAX_RELEVANT_CHUNKS = 3

@@ -16,7 +16,7 @@ class Config:
     
     # LLM Configuration
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AIzaSyBBi1RQgXXxh4CvbByxAdTB9yhZqxIqyBQ")
     DEFAULT_LLM_MODEL = "gpt-4-turbo-preview"
     MAX_TOKENS = 1000
     TEMPERATURE = 0.1
