@@ -1,3 +1,23 @@
+# Simple endpoint to test Hugging Face API connectivity
+@app.get("/test-hf")
+async def test_huggingface_api():
+    try:
+        from fastapi import Response
+        # Use a very simple prompt
+        prompt = "<|system|>You are a helpful assistant.<|user|>Hello!<|assistant|>"
+        url = f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}"
+        headers = {
+            "Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {"inputs": prompt, "parameters": {"max_new_tokens": 20}}
+        async with httpx.AsyncClient(timeout=Config.REQUEST_TIMEOUT) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            return {"result": result}
+    except Exception as e:
+        return {"error": str(e)}
 
 """
 Vercel-Compatible Document Query System (Lightweight, No Local ML)
