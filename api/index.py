@@ -403,18 +403,22 @@ async def call_openai_api(question: str, context: str, use_general_knowledge: bo
             {"role": "system", "content": system_msg},
             {"role": "user", "content": user_content}
         ],
-        "max_tokens": 200,
+        "max_tokens": 300,
         "temperature": 0.2
     }
     
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(url, headers=headers, json=payload)
             if response.status_code == 200:
                 result = response.json()
-                return result["choices"][0]["message"]["content"].strip()
-    except Exception:
-        pass
+                answer = result["choices"][0]["message"]["content"].strip()
+                print(f"✅ OpenAI context-based response: {answer[:100]}...")
+                return answer
+            else:
+                print(f"❌ OpenAI API error: {response.status_code}")
+    except Exception as e:
+        print(f"❌ OpenAI context-based error: {e}")
     return None
 
 async def call_google_api(question: str, context: str, use_general_knowledge: bool = False) -> str:
@@ -446,26 +450,33 @@ async def call_google_api(question: str, context: str, use_general_knowledge: bo
             "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "maxOutputTokens": 200,
+            "maxOutputTokens": 300,
             "temperature": 0.2
         }
     }
     
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(url, headers=headers, json=payload)
             if response.status_code == 200:
                 result = response.json()
-                return result["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except Exception:
-        pass
+                answer = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                print(f"✅ Google context-based response: {answer[:100]}...")
+                return answer
+            else:
+                print(f"❌ Google API error: {response.status_code}")
+    except Exception as e:
+        print(f"❌ Google context-based error: {e}")
     return None
 
 async def call_general_knowledge_api(question: str) -> str:
     """Call LLM APIs to answer using general knowledge when document doesn't have the answer"""
+    print(f"🧠 Attempting general knowledge answer for: {question}")
+    
     # Try OpenAI first for general knowledge
     if Config.OPENAI_API_KEY:
         try:
+            print("📞 Calling OpenAI for general knowledge...")
             url = "https://api.openai.com/v1/chat/completions"
             headers = {
                 "Authorization": f"Bearer {Config.OPENAI_API_KEY}",
@@ -474,48 +485,56 @@ async def call_general_knowledge_api(question: str) -> str:
             payload = {
                 "model": "gpt-3.5-turbo",
                 "messages": [
-                    {"role": "system", "content": "You are a helpful assistant. Answer the question using your general knowledge. Be informative and accurate."},
-                    {"role": "user", "content": f"Question: {question}\n\nNote: The provided document doesn't contain relevant information for this question, so please answer using general knowledge."}
+                    {"role": "system", "content": "You are a helpful assistant. Answer the question using your general knowledge. Be informative and accurate. Provide a comprehensive answer."},
+                    {"role": "user", "content": f"Question: {question}\n\nPlease answer this question using your general knowledge. Be specific and helpful."}
                 ],
-                "max_tokens": 200,
+                "max_tokens": 300,
                 "temperature": 0.3
             }
             
-            async with httpx.AsyncClient(timeout=8.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 if response.status_code == 200:
                     result = response.json()
                     answer = result["choices"][0]["message"]["content"].strip()
+                    print(f"✅ OpenAI general knowledge response: {answer[:100]}...")
                     return f"Based on general knowledge: {answer}"
-        except Exception:
-            pass
+                else:
+                    print(f"❌ OpenAI API error: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"❌ OpenAI general knowledge error: {e}")
     
     # Try Google as fallback
     if Config.GOOGLE_API_KEY:
         try:
+            print("📞 Calling Google for general knowledge fallback...")
             url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={Config.GOOGLE_API_KEY}"
             headers = {"Content-Type": "application/json"}
             payload = {
                 "contents": [{
                     "parts": [{
-                        "text": f"The provided document doesn't contain information about this question. Please answer using general knowledge: {question}"
+                        "text": f"Please answer this question using general knowledge. Be comprehensive and helpful: {question}"
                     }]
                 }],
                 "generationConfig": {
-                    "maxOutputTokens": 200,
+                    "maxOutputTokens": 300,
                     "temperature": 0.3
                 }
             }
             
-            async with httpx.AsyncClient(timeout=8.0) as client:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(url, headers=headers, json=payload)
                 if response.status_code == 200:
                     result = response.json()
                     answer = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    print(f"✅ Google general knowledge response: {answer[:100]}...")
                     return f"Based on general knowledge: {answer}"
-        except Exception:
-            pass
+                else:
+                    print(f"❌ Google API error: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"❌ Google general knowledge error: {e}")
     
+    print("❌ All general knowledge APIs failed")
     return None
 
 def extract_answer_from_context(question: str, context: str) -> str:
