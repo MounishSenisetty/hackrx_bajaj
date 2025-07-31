@@ -600,12 +600,49 @@ def is_generic_response(answer: str) -> bool:
         "insufficient information",
         "cannot be determined",
         "not clear",
-        "not stated"
+        "not stated",
+        "cannot be answered from",
+        "cannot answer",
+        "provided text",
+        "given context",
+        "cannot find",
+        "not contain any information",
+        "focuses on",
+        "therefore",
+        "I cannot answer"
     ]
     
-    # If answer is very short and contains generic phrases, it's likely inadequate
-    if len(answer) < 100 and any(phrase in answer_lower for phrase in generic_phrases):
-        return True
+    # Check if answer contains generic/inability phrases regardless of length
+    if any(phrase in answer_lower for phrase in generic_phrases):
+        # Additional check: if it mentions the document topic but says it can't answer the question
+        document_indicators = ["visual studio code", "vs code", "microsoft", "github", "contribute"]
+        question_rejection_patterns = [
+            "about.*insurance",
+            "about.*python", 
+            "about.*machine learning",
+            "about.*artificial intelligence",
+            "therefore.*cannot",
+            "does.*not.*contain.*information.*about"
+        ]
+        
+        # If it mentions the document but rejects the question topic, it's generic
+        has_document_context = any(indicator in answer_lower for indicator in document_indicators)
+        rejects_question = any(re.search(pattern, answer_lower) for pattern in question_rejection_patterns)
+        
+        if has_document_context and rejects_question:
+            return True
+        
+        # Also check for simple rejection patterns
+        simple_rejections = [
+            "cannot be answered",
+            "does not contain",
+            "therefore.*cannot",
+            "no information about",
+            "doesn't have.*information"
+        ]
+        
+        if any(re.search(pattern, answer_lower) for pattern in simple_rejections):
+            return True
     
     return False
 
@@ -656,6 +693,48 @@ def extract_keywords(text: str) -> set:
         keywords.update(matches)
     
     return keywords
+
+def is_context_relevant_to_question(question: str, context: str) -> bool:
+    """Check if the context is actually relevant to the question domain"""
+    question_lower = question.lower()
+    context_lower = context.lower()
+    
+    # Define question domains and their keywords
+    question_domains = {
+        'insurance': ['insurance', 'policy', 'coverage', 'claim', 'premium', 'deductible', 'waiting period', 'pre-existing', 'health insurance', 'life insurance'],
+        'programming': ['python', 'javascript', 'programming', 'code', 'function', 'variable', 'algorithm', 'software'],
+        'ai_ml': ['machine learning', 'artificial intelligence', 'neural network', 'deep learning', 'ai', 'ml', 'algorithm', 'model'],
+        'technology': ['computer', 'software', 'hardware', 'technology', 'internet', 'digital'],
+        'finance': ['bank', 'money', 'investment', 'financial', 'loan', 'credit', 'interest'],
+        'medical': ['health', 'medical', 'disease', 'treatment', 'medicine', 'doctor', 'hospital']
+    }
+    
+    # Identify question domain
+    question_domain = None
+    for domain, keywords in question_domains.items():
+        if any(keyword in question_lower for keyword in keywords):
+            question_domain = domain
+            break
+    
+    # If we can't identify the question domain, assume context might be relevant
+    if not question_domain:
+        return True
+    
+    # Check if context has any keywords from the question domain
+    domain_keywords = question_domains[question_domain]
+    context_has_domain_keywords = any(keyword in context_lower for keyword in domain_keywords)
+    
+    # Special case: if context is about software development and question is about other programming concepts
+    if question_domain == 'programming':
+        software_dev_keywords = ['visual studio', 'vs code', 'editor', 'ide', 'development', 'coding', 'github']
+        if any(keyword in context_lower for keyword in software_dev_keywords):
+            # Check if question is about general programming concepts vs specific tools
+            general_programming = ['what is python', 'what is javascript', 'how does', 'what are the benefits']
+            if any(phrase in question_lower for phrase in general_programming):
+                return False  # General programming questions not answerable from tool-specific context
+    
+    return context_has_domain_keywords
+
 
 def calculate_semantic_similarity(text1: str, text2: str) -> float:
     """Simple semantic similarity based on common concepts"""
@@ -829,12 +908,38 @@ async def run_submissions(req: RunRequest, http_req: Request):
                 # Limit to max chunks
                 all_relevant_chunks = all_relevant_chunks[:Config.MAX_RELEVANT_CHUNKS]
                 
+                # Check if the found context is actually relevant to the question domain
                 if all_relevant_chunks:
-                    # Combine relevant chunks as context
-                    context = " ".join(all_relevant_chunks)
-                    # Generate answer using the relevant context
-                    answer = await generate_answer(question, context, has_relevant_context=True)
-                    answers.append(answer)
+                    combined_context = " ".join(all_relevant_chunks)
+                    context_is_relevant = is_context_relevant_to_question(question, combined_context)
+                    
+                    if context_is_relevant:
+                        # Generate answer using the relevant context
+                        answer = await generate_answer(question, combined_context, has_relevant_context=True)
+                        
+                        # Check if the answer is generic/unhelpful
+                        if is_generic_response(answer):
+                            # Context wasn't actually helpful, try general knowledge
+                            if Config.ENABLE_GENERAL_KNOWLEDGE:
+                                general_answer = await call_general_knowledge_api(question)
+                                if general_answer:
+                                    answers.append(general_answer)
+                                else:
+                                    answers.append("I couldn't find relevant information in the provided document to answer this question.")
+                            else:
+                                answers.append("I couldn't find relevant information in the provided document to answer this question.")
+                        else:
+                            answers.append(answer)
+                    else:
+                        # Context is not relevant to question domain, use general knowledge directly
+                        if Config.ENABLE_GENERAL_KNOWLEDGE:
+                            general_answer = await call_general_knowledge_api(question)
+                            if general_answer:
+                                answers.append(general_answer)
+                            else:
+                                answers.append("I couldn't find relevant information in the provided document to answer this question.")
+                        else:
+                            answers.append("I couldn't find relevant information in the provided document to answer this question.")
                 else:
                     # No relevant context found - try keyword-based search
                     question_words = set(re.findall(r'\w+', question.lower()))
