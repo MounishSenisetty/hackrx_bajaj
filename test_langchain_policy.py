@@ -10,13 +10,14 @@ def test_policy_document():
     base_url = "https://hackrx-bajaj.vercel.app"
     bearer_token = "ca6914a6c8df9d1ce075149c3ab9f060e666c75940576e37a98b3cf0e9092c72"
     
-    print("Testing LangChain-based Q&A System with Policy Document")
+    print("Testing Optimized Policy Document Q&A System")
     print("=" * 70)
     
     # Your specific test case
     document_url = "https://hackrx.blob.core.windows.net/assets/policy.pdf?sv=2023-01-03&st=2025-07-04T09%3A11%3A24Z&se=2027-07-05T09%3A11%3A00Z&sr=b&sp=r&sig=N4a9OU0w0QXO6AOIBiu4bpl7AXvEZogeT%2FjUHNO7HzQ%3D"
     
     questions = [
+        "Who is the prime minister of INDIA",
         "What is the waiting period for pre-existing diseases (PED) to be covered?",
         "Does this policy cover maternity expenses, and what are the conditions?",
         "What is the waiting period for cataract surgery?",
@@ -30,7 +31,7 @@ def test_policy_document():
     
     print(f"📄 Document: Policy PDF")
     print(f"❓ Questions: {len(questions)}")
-    print("⏳ Processing with LangChain...")
+    print("⏳ Processing with optimized system...")
     
     try:
         headers = {
@@ -47,7 +48,7 @@ def test_policy_document():
             f"{base_url}/hackrx/run", 
             headers=headers, 
             json=payload, 
-            timeout=120  # Longer timeout for LangChain processing
+            timeout=90  # Reasonable timeout for optimized processing
         )
         
         if response.status_code == 200:
@@ -71,7 +72,7 @@ def test_policy_document():
                     
             print("\n" + "=" * 70)
             print("🎯 EXPECTED RESULTS:")
-            print("✅ Questions 1: Should use general knowledge (PM of India)")
+            print("✅ Question 1: Should use general knowledge (PM of India)")
             print("✅ Questions 2-10: Should find specific answers in policy document")
             print("✅ All answers should be accurate and specific")
             print("=" * 70)
@@ -84,6 +85,6 @@ def test_policy_document():
 
 if __name__ == "__main__":
     # Wait for deployment
-    print("⏳ Waiting for LangChain deployment to complete...")
-    time.sleep(30)
+    print("⏳ Waiting for optimized deployment to complete...")
+    time.sleep(20)
     test_policy_document()
