@@ -37,8 +37,9 @@ class Config:
     MAX_CHUNKS = 20
     REQUEST_TIMEOUT = 10.0
     MAX_DOCUMENT_SIZE = 10 * 1024 * 1024
-    SIMILARITY_THRESHOLD = 0.7
-    MAX_RELEVANT_CHUNKS = 3
+    SIMILARITY_THRESHOLD = 0.5  # Lowered from 0.7 to find more relevant content
+    MAX_RELEVANT_CHUNKS = 5  # Increased from 3 to get more context
+    ENABLE_GENERAL_KNOWLEDGE = True  # Allow LLM to use general knowledge
 
 
 
@@ -374,8 +375,8 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
 
 
 # Generative APIs with fallback
-async def call_openai_api(question: str, context: str) -> str:
-    """Call OpenAI GPT API"""
+async def call_openai_api(question: str, context: str, use_general_knowledge: bool = False) -> str:
+    """Call OpenAI GPT API with context-aware prompting"""
     if not Config.OPENAI_API_KEY:
         return None
     
@@ -384,14 +385,26 @@ async def call_openai_api(question: str, context: str) -> str:
         "Authorization": f"Bearer {Config.OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
+    
+    # Create context-aware system message
+    if use_general_knowledge:
+        system_msg = """You are a helpful assistant. Answer the question using the provided context if relevant. 
+        If the context doesn't contain enough information to fully answer the question, you may supplement with general knowledge, 
+        but clearly indicate when you're doing so. Be specific and helpful."""
+    else:
+        system_msg = """Answer the question based on the provided context. Be specific and extract relevant details. 
+        If the context mentions related concepts but not the exact answer, explain what information is available."""
+    
+    user_content = f"Context from document: {context}\n\nQuestion: {question}"
+    
     payload = {
         "model": "gpt-3.5-turbo",
         "messages": [
-            {"role": "system", "content": "Answer the question based on the provided context. Be concise and accurate."},
-            {"role": "user", "content": f"Context: {context}\n\nQuestion: {question}"}
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_content}
         ],
-        "max_tokens": 150,
-        "temperature": 0.1
+        "max_tokens": 200,
+        "temperature": 0.2
     }
     
     try:
@@ -404,22 +417,37 @@ async def call_openai_api(question: str, context: str) -> str:
         pass
     return None
 
-async def call_google_api(question: str, context: str) -> str:
-    """Call Google Gemini API"""
+async def call_google_api(question: str, context: str, use_general_knowledge: bool = False) -> str:
+    """Call Google Gemini API with context-aware prompting"""
     if not Config.GOOGLE_API_KEY:
         return None
     
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={Config.GOOGLE_API_KEY}"
     headers = {"Content-Type": "application/json"}
+    
+    if use_general_knowledge:
+        prompt = f"""Based on the provided context, answer the question. If the context doesn't have complete information, 
+        you may use general knowledge to provide a helpful answer, but indicate when you're supplementing with external knowledge.
+
+        Context: {context}
+        
+        Question: {question}
+        
+        Provide a comprehensive and helpful answer."""
+    else:
+        prompt = f"""Based on this context, answer the question. Extract specific details and be thorough:
+
+        Context: {context}
+        
+        Question: {question}"""
+    
     payload = {
         "contents": [{
-            "parts": [{
-                "text": f"Based on this context, answer the question concisely:\n\nContext: {context}\n\nQuestion: {question}"
-            }]
+            "parts": [{"text": prompt}]
         }],
         "generationConfig": {
-            "maxOutputTokens": 150,
-            "temperature": 0.1
+            "maxOutputTokens": 200,
+            "temperature": 0.2
         }
     }
     
@@ -431,6 +459,63 @@ async def call_google_api(question: str, context: str) -> str:
                 return result["candidates"][0]["content"]["parts"][0]["text"].strip()
     except Exception:
         pass
+    return None
+
+async def call_general_knowledge_api(question: str) -> str:
+    """Call LLM APIs to answer using general knowledge when document doesn't have the answer"""
+    # Try OpenAI first for general knowledge
+    if Config.OPENAI_API_KEY:
+        try:
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {Config.OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant. Answer the question using your general knowledge. Be informative and accurate."},
+                    {"role": "user", "content": f"Question: {question}\n\nNote: The provided document doesn't contain relevant information for this question, so please answer using general knowledge."}
+                ],
+                "max_tokens": 200,
+                "temperature": 0.3
+            }
+            
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                if response.status_code == 200:
+                    result = response.json()
+                    answer = result["choices"][0]["message"]["content"].strip()
+                    return f"Based on general knowledge: {answer}"
+        except Exception:
+            pass
+    
+    # Try Google as fallback
+    if Config.GOOGLE_API_KEY:
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={Config.GOOGLE_API_KEY}"
+            headers = {"Content-Type": "application/json"}
+            payload = {
+                "contents": [{
+                    "parts": [{
+                        "text": f"The provided document doesn't contain information about this question. Please answer using general knowledge: {question}"
+                    }]
+                }],
+                "generationConfig": {
+                    "maxOutputTokens": 200,
+                    "temperature": 0.3
+                }
+            }
+            
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.post(url, headers=headers, json=payload)
+                if response.status_code == 200:
+                    result = response.json()
+                    answer = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+                    return f"Based on general knowledge: {answer}"
+        except Exception:
+            pass
+    
     return None
 
 def extract_answer_from_context(question: str, context: str) -> str:
@@ -464,20 +549,136 @@ def extract_answer_from_context(question: str, context: str) -> str:
     
     return best_sentence if best_sentence else "No relevant information found."
 
-async def generate_answer(question: str, context: str) -> str:
-    """Generate answer with API fallback chain"""
-    # Try OpenAI first
-    answer = await call_openai_api(question, context)
-    if answer:
-        return answer
+async def generate_answer(question: str, context: str, has_relevant_context: bool = True) -> str:
+    """Generate answer with intelligent context handling and general knowledge fallback"""
     
-    # Try Google if OpenAI fails
-    answer = await call_google_api(question, context)
-    if answer:
-        return answer
+    # If we have relevant context, try context-based answering first
+    if has_relevant_context and context.strip():
+        # Try OpenAI with context
+        answer = await call_openai_api(question, context, use_general_knowledge=False)
+        if answer and not is_generic_response(answer):
+            return answer
+        
+        # Try Google with context
+        answer = await call_google_api(question, context, use_general_knowledge=False)
+        if answer and not is_generic_response(answer):
+            return answer
+        
+        # Try with general knowledge enabled (context + general knowledge)
+        if Config.ENABLE_GENERAL_KNOWLEDGE:
+            answer = await call_openai_api(question, context, use_general_knowledge=True)
+            if answer and not is_generic_response(answer):
+                return answer
+            
+            answer = await call_google_api(question, context, use_general_knowledge=True)
+            if answer and not is_generic_response(answer):
+                return answer
     
-    # Fallback to rule-based extraction
-    return extract_answer_from_context(question, context)
+    # If context-based answering fails or no relevant context, try general knowledge
+    if Config.ENABLE_GENERAL_KNOWLEDGE:
+        general_answer = await call_general_knowledge_api(question)
+        if general_answer:
+            return general_answer
+    
+    # Final fallback to rule-based extraction
+    if context.strip():
+        return extract_answer_from_context(question, context)
+    else:
+        return "I don't have enough information in the provided document to answer this question."
+
+def is_generic_response(answer: str) -> bool:
+    """Check if the response is too generic or indicates lack of information"""
+    answer_lower = answer.lower()
+    generic_phrases = [
+        "does not specify",
+        "not mentioned",
+        "doesn't mention",
+        "not provided",
+        "no information",
+        "doesn't contain",
+        "not available",
+        "insufficient information",
+        "cannot be determined",
+        "not clear",
+        "not stated"
+    ]
+    
+    # If answer is very short and contains generic phrases, it's likely inadequate
+    if len(answer) < 100 and any(phrase in answer_lower for phrase in generic_phrases):
+        return True
+    
+    return False
+
+def find_related_content(question: str, chunks: List[str]) -> List[str]:
+    """Find content that might be related even if not directly matching"""
+    question_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', question.lower()))
+    question_keywords = extract_keywords(question)
+    
+    related_chunks = []
+    
+    for chunk in chunks:
+        chunk_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', chunk.lower()))
+        chunk_keywords = extract_keywords(chunk)
+        
+        # Calculate different types of similarity
+        word_overlap = len(question_words & chunk_words)
+        keyword_overlap = len(question_keywords & chunk_keywords)
+        
+        # Semantic similarity (look for related concepts)
+        semantic_score = calculate_semantic_similarity(question, chunk)
+        
+        # Combined score
+        total_score = word_overlap + (keyword_overlap * 2) + (semantic_score * 3)
+        
+        if total_score > 2:  # Lower threshold for related content
+            related_chunks.append((chunk, total_score))
+    
+    # Sort by relevance and return top chunks
+    related_chunks.sort(key=lambda x: x[1], reverse=True)
+    return [chunk for chunk, score in related_chunks[:Config.MAX_RELEVANT_CHUNKS]]
+
+def extract_keywords(text: str) -> set:
+    """Extract important keywords from text"""
+    # Common important words that should be weighted higher
+    important_patterns = [
+        r'\b(?:waiting|period|time|duration|days|months|years)\b',
+        r'\b(?:disease|condition|illness|medical|health)\b',
+        r'\b(?:pre-existing|existing|prior|previous)\b',
+        r'\b(?:coverage|benefit|claim|policy|insurance)\b',
+        r'\b(?:exclusion|limitation|restriction)\b',
+        r'\b(?:premium|cost|fee|payment)\b',
+        r'\b(?:eligibility|qualification|requirement)\b'
+    ]
+    
+    keywords = set()
+    for pattern in important_patterns:
+        matches = re.findall(pattern, text.lower())
+        keywords.update(matches)
+    
+    return keywords
+
+def calculate_semantic_similarity(text1: str, text2: str) -> float:
+    """Simple semantic similarity based on common concepts"""
+    # Insurance/medical concept groups
+    concept_groups = [
+        ['waiting', 'period', 'time', 'duration', 'wait'],
+        ['disease', 'condition', 'illness', 'medical', 'health', 'sickness'],
+        ['pre-existing', 'existing', 'prior', 'previous', 'before'],
+        ['coverage', 'benefit', 'claim', 'policy', 'insurance', 'cover'],
+        ['exclusion', 'limitation', 'restriction', 'exclude', 'limit'],
+        ['premium', 'cost', 'fee', 'payment', 'price', 'amount']
+    ]
+    
+    text1_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', text1.lower()))
+    text2_words = set(re.findall(r'\b[a-zA-Z]{3,}\b', text2.lower()))
+    
+    concept_matches = 0
+    for group in concept_groups:
+        group_set = set(group)
+        if (text1_words & group_set) and (text2_words & group_set):
+            concept_matches += 1
+    
+    return concept_matches / len(concept_groups)
 
 
 # API Endpoints
@@ -605,17 +806,37 @@ async def run_submissions(req: RunRequest, http_req: Request):
                 
                 # Sort by similarity and get top chunks
                 similarities.sort(key=lambda x: x[1], reverse=True)
-                relevant_chunks = [chunk for chunk, sim in similarities[:Config.MAX_RELEVANT_CHUNKS] 
+                
+                # Get highly relevant chunks
+                highly_relevant = [chunk for chunk, sim in similarities[:Config.MAX_RELEVANT_CHUNKS] 
                                  if sim > Config.SIMILARITY_THRESHOLD]
                 
-                if relevant_chunks:
+                # Get moderately relevant chunks if highly relevant ones are few
+                if len(highly_relevant) < 2:
+                    moderately_relevant = [chunk for chunk, sim in similarities[:Config.MAX_RELEVANT_CHUNKS * 2] 
+                                         if sim > Config.SIMILARITY_THRESHOLD * 0.7]
+                    highly_relevant.extend(moderately_relevant[:Config.MAX_RELEVANT_CHUNKS - len(highly_relevant)])
+                
+                # Find related content using keyword and semantic matching
+                related_content = find_related_content(question, chunks)
+                
+                # Combine relevant chunks with related content
+                all_relevant_chunks = highly_relevant.copy()
+                for related_chunk in related_content:
+                    if related_chunk not in all_relevant_chunks:
+                        all_relevant_chunks.append(related_chunk)
+                
+                # Limit to max chunks
+                all_relevant_chunks = all_relevant_chunks[:Config.MAX_RELEVANT_CHUNKS]
+                
+                if all_relevant_chunks:
                     # Combine relevant chunks as context
-                    context = " ".join(relevant_chunks)
-                    # Generate answer using the most relevant context
-                    answer = await generate_answer(question, context)
+                    context = " ".join(all_relevant_chunks)
+                    # Generate answer using the relevant context
+                    answer = await generate_answer(question, context, has_relevant_context=True)
                     answers.append(answer)
                 else:
-                    # Fallback: use simple text search
+                    # No relevant context found - try keyword-based search
                     question_words = set(re.findall(r'\w+', question.lower()))
                     best_chunk = ""
                     best_score = 0
@@ -627,14 +848,35 @@ async def run_submissions(req: RunRequest, http_req: Request):
                             best_score = overlap
                             best_chunk = chunk
                     
-                    if best_chunk:
-                        answer = await generate_answer(question, best_chunk)
+                    if best_chunk and best_score > 1:
+                        # Found some keyword overlap
+                        answer = await generate_answer(question, best_chunk, has_relevant_context=True)
                         answers.append(answer)
                     else:
-                        answers.append("I couldn't find relevant information to answer this question.")
+                        # No relevant content in document - use general knowledge
+                        if Config.ENABLE_GENERAL_KNOWLEDGE:
+                            general_answer = await call_general_knowledge_api(question)
+                            if general_answer:
+                                answers.append(general_answer)
+                            else:
+                                answers.append("I couldn't find relevant information in the provided document to answer this question.")
+                        else:
+                            answers.append("I couldn't find relevant information in the provided document to answer this question.")
                         
             except Exception as e:
-                answers.append(f"Error processing question: {str(e)}")
+                print(f"Error processing question '{question}': {e}")
+                # Try to get a general knowledge answer even if processing fails
+                try:
+                    if Config.ENABLE_GENERAL_KNOWLEDGE:
+                        general_answer = await call_general_knowledge_api(question)
+                        if general_answer:
+                            answers.append(general_answer)
+                        else:
+                            answers.append("I encountered an error processing this question.")
+                    else:
+                        answers.append("I encountered an error processing this question.")
+                except:
+                    answers.append("I encountered an error processing this question.")
         
         return RunResponse(answers=answers)
         
