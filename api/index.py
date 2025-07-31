@@ -1,30 +1,14 @@
-# Simple endpoint to test Hugging Face API connectivity
-@app.get("/test-hf")
-async def test_huggingface_api():
-    try:
-        from fastapi import Response
-        # Use a very simple prompt
-        prompt = "<|system|>You are a helpful assistant.<|user|>Hello!<|assistant|>"
-        url = f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}"
-        headers = {
-            "Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {"inputs": prompt, "parameters": {"max_new_tokens": 20}}
-        async with httpx.AsyncClient(timeout=Config.REQUEST_TIMEOUT) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            result = response.json()
-            return {"result": result}
-    except Exception as e:
-        return {"error": str(e)}
-
 """
 Vercel-Compatible Document Query System (Lightweight, No Local ML)
 """
 
-
 import os
+# Load .env automatically for local development
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 import re
 import io
 import httpx
@@ -42,9 +26,9 @@ app = FastAPI(title="Vercel-Compatible Document Query System", version="1.0.0")
 
 # Configuration
 class Config:
-    BEARER_TOKEN = os.getenv("BEARER_TOKEN", "ca6914a6c8df9d1ce075149c3ab9f060e666c75940576e37a98b3cf0e9092c72")
+    BEARER_TOKEN = os.getenv("BEARER_TOKEN")
     HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
-    HUGGINGFACE_MODEL = "HuggingFaceH4/zephyr-7b-beta"
+    HUGGINGFACE_MODEL = "facebook/bart-large-cnn"  # Well-known summarization model
     CHUNK_SIZE = 400  # characters per chunk
     CHUNK_OVERLAP = 50
     MAX_CHUNKS = 10
@@ -159,21 +143,23 @@ async def call_huggingface_generative_api(question: str, context: str = "") -> s
         "Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}",
         "Content-Type": "application/json"
     }
-    prompt = f"<|system|>You are a helpful assistant.<|user|>Context: {context}\nQuestion: {question}<|assistant|>"
-    payload = {"inputs": prompt, "parameters": {"max_new_tokens": 200}}
+    # Use summarization to answer questions
+    text_to_summarize = f"Question: {question}\nContext: {context[:800]}\nPlease provide a relevant answer based on the context."
+    payload = {"inputs": text_to_summarize}
+    
     try:
         async with httpx.AsyncClient(timeout=Config.REQUEST_TIMEOUT) as client:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             result = response.json()
-            if isinstance(result, list) and len(result) > 0 and "generated_text" in result[0]:
-                return result[0]["generated_text"].replace(prompt, "").strip()
-            elif isinstance(result, dict) and "generated_text" in result:
-                return result["generated_text"].replace(prompt, "").strip()
+            if isinstance(result, list) and len(result) > 0 and "summary_text" in result[0]:
+                return result[0]["summary_text"]
+            elif isinstance(result, dict) and "summary_text" in result:
+                return result["summary_text"]
             else:
-                return str(result)
+                return f"Unexpected response format: {result}"
     except Exception as e:
-        return f"Error calling HuggingFace Generative API: {e}"
+        return f"Error calling HuggingFace API: {e}"
 
 
 # API Endpoints
@@ -181,10 +167,52 @@ async def call_huggingface_generative_api(question: str, context: str = "") -> s
 async def root():
     return {"message": "Vercel-Compatible Document Query System is running"}
 
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy",
+        "bearer_token_set": bool(Config.BEARER_TOKEN),
+        "huggingface_key_set": bool(Config.HUGGINGFACE_API_KEY),
+        "timestamp": "2025-07-31"
+    }
+
+@app.get("/test-hf")
+async def test_huggingface_api():
+    """Test Hugging Face API connectivity"""
+    try:
+        if not Config.HUGGINGFACE_API_KEY:
+            return {"error": "HuggingFace API key not set in environment"}
+        
+        # Test with simple summarization
+        url = f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}"
+        headers = {
+            "Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "inputs": "The quick brown fox jumps over the lazy dog. This is a test sentence to check if the summarization model is working properly."
+        }
+        
+        async with httpx.AsyncClient(timeout=Config.REQUEST_TIMEOUT) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            result = response.json()
+            return {"result": result, "model": Config.HUGGINGFACE_MODEL}
+    except Exception as e:
+        return {"error": str(e)}
+
 @app.post("/hackrx/run", response_model=RunResponse)
 async def run_submissions(req: RunRequest, http_req: Request):
-    if http_req.headers.get("Authorization") != f"Bearer {Config.BEARER_TOKEN}":
-        raise HTTPException(403, "Invalid Bearer token")
+    # Authentication
+    auth_header = http_req.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    provided_token = auth_header.split(" ")[1]
+    if not Config.BEARER_TOKEN:
+        raise HTTPException(status_code=500, detail="Server misconfiguration: BEARER_TOKEN not set in environment.")
+    if provided_token != Config.BEARER_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid Bearer token")
     try:
         doc_text = await fetch_document(req.documents)
         if not doc_text or len(doc_text.strip()) < 10:
