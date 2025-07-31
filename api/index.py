@@ -1,5 +1,5 @@
 """
-Vercel-Compatible Document Query System (Lightweight, No Local ML)
+Vercel-Compatible Document Query System with Vector Search
 """
 
 import os
@@ -11,10 +11,12 @@ except ImportError:
     pass
 import re
 import io
+import json
 import httpx
+import numpy as np
 from fastapi import FastAPI, Request, HTTPException
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Dict, Any
 try:
     import PyPDF2
     PDF_AVAILABLE = True
@@ -27,13 +29,16 @@ app = FastAPI(title="Vercel-Compatible Document Query System", version="1.0.0")
 # Configuration
 class Config:
     BEARER_TOKEN = os.getenv("BEARER_TOKEN")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
     HUGGINGFACE_API_KEY = os.getenv("HUGGINGFACE_API_KEY", "")
-    HUGGINGFACE_MODEL = "facebook/bart-large-cnn"  # Well-known summarization model
-    CHUNK_SIZE = 400  # characters per chunk
-    CHUNK_OVERLAP = 50
-    MAX_CHUNKS = 10
-    REQUEST_TIMEOUT = 30.0
+    CHUNK_SIZE = 800  # characters per chunk
+    CHUNK_OVERLAP = 100
+    MAX_CHUNKS = 20
+    REQUEST_TIMEOUT = 10.0
     MAX_DOCUMENT_SIZE = 10 * 1024 * 1024
+    SIMILARITY_THRESHOLD = 0.7
+    MAX_RELEVANT_CHUNKS = 3
 
 
 
@@ -128,38 +133,207 @@ def smart_chunk_text(text: str) -> List[str]:
 
 
 
-# No local embeddings or vector search in Vercel-compatible version
-
-
-
-
-
-# Generative: Use HuggingFace generative model for answers
-async def call_huggingface_generative_api(question: str, context: str = "") -> str:
-    if not Config.HUGGINGFACE_API_KEY:
-        return "HuggingFace API key not set."
-    url = f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}"
+# Embedding and Vector Search Functions
+async def get_openai_embedding(text: str) -> List[float]:
+    """Get embeddings from OpenAI API"""
+    if not Config.OPENAI_API_KEY:
+        return None
+    
+    url = "https://api.openai.com/v1/embeddings"
     headers = {
-        "Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}",
+        "Authorization": f"Bearer {Config.OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
-    # Use summarization to answer questions
-    text_to_summarize = f"Question: {question}\nContext: {context[:800]}\nPlease provide a relevant answer based on the context."
-    payload = {"inputs": text_to_summarize}
+    payload = {
+        "input": text[:8000],  # Limit input size
+        "model": "text-embedding-3-small"
+    }
     
     try:
-        async with httpx.AsyncClient(timeout=Config.REQUEST_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            result = response.json()
-            if isinstance(result, list) and len(result) > 0 and "summary_text" in result[0]:
-                return result[0]["summary_text"]
-            elif isinstance(result, dict) and "summary_text" in result:
-                return result["summary_text"]
-            else:
-                return f"Unexpected response format: {result}"
-    except Exception as e:
-        return f"Error calling HuggingFace API: {e}"
+            if response.status_code == 200:
+                result = response.json()
+                return result["data"][0]["embedding"]
+    except Exception:
+        pass
+    return None
+
+async def get_google_embedding(text: str) -> List[float]:
+    """Get embeddings from Google API"""
+    if not Config.GOOGLE_API_KEY:
+        return None
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key={Config.GOOGLE_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "model": "models/embedding-001",
+        "content": {"parts": [{"text": text[:8000]}]}
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code == 200:
+                result = response.json()
+                return result["embedding"]["values"]
+    except Exception:
+        pass
+    return None
+
+def simple_embedding(text: str) -> List[float]:
+    """Fallback: Simple TF-IDF like embedding"""
+    words = re.findall(r'\w+', text.lower())
+    # Create a simple hash-based embedding
+    embedding = [0.0] * 384  # Standard embedding size
+    for i, word in enumerate(words[:50]):  # Limit to 50 words
+        hash_val = hash(word) % 384
+        embedding[hash_val] += 1.0 / (i + 1)  # Position weight
+    
+    # Normalize
+    norm = sum(x*x for x in embedding) ** 0.5
+    if norm > 0:
+        embedding = [x/norm for x in embedding]
+    return embedding
+
+async def get_embedding(text: str) -> List[float]:
+    """Get embeddings with fallback chain: OpenAI -> Google -> Simple"""
+    # Try OpenAI first (fastest and most accurate)
+    embedding = await get_openai_embedding(text)
+    if embedding:
+        return embedding
+    
+    # Try Google if OpenAI fails
+    embedding = await get_google_embedding(text)
+    if embedding:
+        return embedding
+    
+    # Fallback to simple embedding
+    return simple_embedding(text)
+
+def cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Calculate cosine similarity between two vectors"""
+    if len(a) != len(b):
+        return 0.0
+    
+    dot_product = sum(x*y for x, y in zip(a, b))
+    norm_a = sum(x*x for x in a) ** 0.5
+    norm_b = sum(x*x for x in b) ** 0.5
+    
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    
+    return dot_product / (norm_a * norm_b)
+
+
+
+
+
+# Generative APIs with fallback
+async def call_openai_api(question: str, context: str) -> str:
+    """Call OpenAI GPT API"""
+    if not Config.OPENAI_API_KEY:
+        return None
+    
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {Config.OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "gpt-3.5-turbo",
+        "messages": [
+            {"role": "system", "content": "Answer the question based on the provided context. Be concise and accurate."},
+            {"role": "user", "content": f"Context: {context}\n\nQuestion: {question}"}
+        ],
+        "max_tokens": 150,
+        "temperature": 0.1
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code == 200:
+                result = response.json()
+                return result["choices"][0]["message"]["content"].strip()
+    except Exception:
+        pass
+    return None
+
+async def call_google_api(question: str, context: str) -> str:
+    """Call Google Gemini API"""
+    if not Config.GOOGLE_API_KEY:
+        return None
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={Config.GOOGLE_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": f"Based on this context, answer the question concisely:\n\nContext: {context}\n\nQuestion: {question}"
+            }]
+        }],
+        "generationConfig": {
+            "maxOutputTokens": 150,
+            "temperature": 0.1
+        }
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code == 200:
+                result = response.json()
+                return result["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except Exception:
+        pass
+    return None
+
+def extract_answer_from_context(question: str, context: str) -> str:
+    """Simple rule-based answer extraction as fallback"""
+    question_lower = question.lower()
+    context_lower = context.lower()
+    
+    # Look for direct answers to common question patterns
+    if "what is" in question_lower or "what are" in question_lower:
+        sentences = re.split(r'[.!?]+', context)
+        for sentence in sentences:
+            if any(word in sentence.lower() for word in question_lower.split()[2:]):
+                return sentence.strip()
+    
+    # For other questions, return the most relevant sentence
+    sentences = re.split(r'[.!?]+', context)
+    question_words = set(re.findall(r'\w+', question_lower))
+    
+    best_sentence = ""
+    best_score = 0
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if len(sentence) < 10:
+            continue
+        sentence_words = set(re.findall(r'\w+', sentence.lower()))
+        overlap = len(question_words & sentence_words)
+        if overlap > best_score:
+            best_score = overlap
+            best_sentence = sentence
+    
+    return best_sentence if best_sentence else "No relevant information found."
+
+async def generate_answer(question: str, context: str) -> str:
+    """Generate answer with API fallback chain"""
+    # Try OpenAI first
+    answer = await call_openai_api(question, context)
+    if answer:
+        return answer
+    
+    # Try Google if OpenAI fails
+    answer = await call_google_api(question, context)
+    if answer:
+        return answer
+    
+    # Fallback to rule-based extraction
+    return extract_answer_from_context(question, context)
 
 
 # API Endpoints
@@ -176,30 +350,24 @@ async def health():
         "timestamp": "2025-07-31"
     }
 
-@app.get("/test-hf")
-async def test_huggingface_api():
-    """Test Hugging Face API connectivity"""
+@app.get("/test-apis")
+async def test_apis():
+    """Test API connectivity"""
+    results = {
+        "openai_available": bool(Config.OPENAI_API_KEY),
+        "google_available": bool(Config.GOOGLE_API_KEY),
+        "huggingface_available": bool(Config.HUGGINGFACE_API_KEY),
+    }
+    
+    # Quick test of embedding generation
     try:
-        if not Config.HUGGINGFACE_API_KEY:
-            return {"error": "HuggingFace API key not set in environment"}
-        
-        # Test with simple summarization
-        url = f"https://api-inference.huggingface.co/models/{Config.HUGGINGFACE_MODEL}"
-        headers = {
-            "Authorization": f"Bearer {Config.HUGGINGFACE_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "inputs": "The quick brown fox jumps over the lazy dog. This is a test sentence to check if the summarization model is working properly."
-        }
-        
-        async with httpx.AsyncClient(timeout=Config.REQUEST_TIMEOUT) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            result = response.json()
-            return {"result": result, "model": Config.HUGGINGFACE_MODEL}
+        test_embedding = await get_embedding("test text")
+        results["embedding_working"] = len(test_embedding) > 0
+        results["embedding_size"] = len(test_embedding)
     except Exception as e:
-        return {"error": str(e)}
+        results["embedding_error"] = str(e)
+    
+    return results
 
 @app.post("/hackrx/run", response_model=RunResponse)
 async def run_submissions(req: RunRequest, http_req: Request):
@@ -213,32 +381,75 @@ async def run_submissions(req: RunRequest, http_req: Request):
         raise HTTPException(status_code=500, detail="Server misconfiguration: BEARER_TOKEN not set in environment.")
     if provided_token != Config.BEARER_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid Bearer token")
+    
     try:
+        # Fetch and process document
         doc_text = await fetch_document(req.documents)
         if not doc_text or len(doc_text.strip()) < 10:
             raise HTTPException(400, "Failed to extract content from document")
-        # Chunk the document for QA
-        chunks = []
-        text = doc_text
-        chunk_size = Config.CHUNK_SIZE
-        overlap = Config.CHUNK_OVERLAP
-        max_chunks = Config.MAX_CHUNKS
-        start = 0
-        while start < len(text) and len(chunks) < max_chunks:
-            end = min(start + chunk_size, len(text))
-            chunk = text[start:end]
-            chunks.append(chunk)
-            start += chunk_size - overlap
+        
+        # Smart chunking
+        chunks = smart_chunk_text(doc_text)
+        
+        # Create embeddings for chunks (batch process for efficiency)
+        chunk_embeddings = []
+        for chunk in chunks:
+            try:
+                embedding = await get_embedding(chunk)
+                chunk_embeddings.append((chunk, embedding))
+            except Exception:
+                # Skip chunks that fail embedding
+                continue
+        
+        # Process each question
         answers = []
-        for q in req.questions:
-            found_answer = None
-            for chunk in chunks:
-                answer = await call_huggingface_generative_api(q, chunk)
-                if answer.strip().lower() not in ["", "n/a", "no answer", "empty", "none"]:
-                    found_answer = answer.strip()
-                    break
-            answers.append(found_answer if found_answer else "Could not find a specific answer in the document.")
+        for question in req.questions:
+            try:
+                # Get question embedding
+                question_embedding = await get_embedding(question)
+                
+                # Find most relevant chunks using cosine similarity
+                similarities = []
+                for chunk, chunk_embedding in chunk_embeddings:
+                    if chunk_embedding and question_embedding:
+                        similarity = cosine_similarity(question_embedding, chunk_embedding)
+                        similarities.append((chunk, similarity))
+                
+                # Sort by similarity and get top chunks
+                similarities.sort(key=lambda x: x[1], reverse=True)
+                relevant_chunks = [chunk for chunk, sim in similarities[:Config.MAX_RELEVANT_CHUNKS] 
+                                 if sim > Config.SIMILARITY_THRESHOLD]
+                
+                if relevant_chunks:
+                    # Combine relevant chunks as context
+                    context = " ".join(relevant_chunks)
+                    # Generate answer using the most relevant context
+                    answer = await generate_answer(question, context)
+                    answers.append(answer)
+                else:
+                    # Fallback: use simple text search
+                    question_words = set(re.findall(r'\w+', question.lower()))
+                    best_chunk = ""
+                    best_score = 0
+                    
+                    for chunk in chunks:
+                        chunk_words = set(re.findall(r'\w+', chunk.lower()))
+                        overlap = len(question_words & chunk_words)
+                        if overlap > best_score:
+                            best_score = overlap
+                            best_chunk = chunk
+                    
+                    if best_chunk:
+                        answer = await generate_answer(question, best_chunk)
+                        answers.append(answer)
+                    else:
+                        answers.append("I couldn't find relevant information to answer this question.")
+                        
+            except Exception as e:
+                answers.append(f"Error processing question: {str(e)}")
+        
         return RunResponse(answers=answers)
+        
     except HTTPException as he:
         raise he
     except Exception as e:

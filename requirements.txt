@@ -2,4 +2,6 @@ fastapi
 httpx
 pydantic
 PyPDF2
+python-dotenv
+numpy
 
