@@ -4,4 +4,5 @@ pydantic
 PyPDF2
 python-dotenv
 numpy
+PyMuPDF
 

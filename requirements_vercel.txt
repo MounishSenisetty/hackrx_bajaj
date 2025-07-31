@@ -4,6 +4,7 @@ pydantic==2.5.2
 PyPDF2==3.0.1
 python-dotenv==1.0.0
 numpy==1.24.3
+PyMuPDF==1.23.14
 
 # LangChain core - using more stable versions
 langchain==0.0.350

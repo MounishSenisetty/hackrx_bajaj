@@ -72,30 +72,174 @@ async def fetch_document(url: str) -> str:
         raise HTTPException(500, f"Document fetch failed: {e}")
 
 def extract_pdf_text(content: bytes) -> str:
+    """Enhanced PDF text extraction with multiple fallback methods"""
     try:
         pdf_file = io.BytesIO(content)
         pdf_reader = PyPDF2.PdfReader(pdf_file)
-        text = "".join(page.extract_text() + "\n" for page in pdf_reader.pages if page.extract_text())
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text if len(text) >= 50 else extract_text_fallback(content)
+        
+        # Method 1: Standard text extraction
+        full_text = ""
+        for page_num, page in enumerate(pdf_reader.pages):
+            try:
+                page_text = page.extract_text()
+                if page_text and page_text.strip():
+                    full_text += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
+            except Exception as e:
+                print(f"Failed to extract text from page {page_num + 1}: {e}")
+                continue
+        
+        # Clean up the extracted text
+        if full_text.strip():
+            # Remove excessive whitespace and normalize
+            full_text = re.sub(r'\s+', ' ', full_text)
+            full_text = re.sub(r'\n\s*\n', '\n', full_text)
+            full_text = full_text.strip()
+            
+            # Check if we got meaningful content (not just metadata)
+            meaningful_words = len(re.findall(r'\b[a-zA-Z]{3,}\b', full_text))
+            if meaningful_words > 10 and len(full_text) > 100:
+                print(f"Successfully extracted {len(full_text)} characters from PDF with {meaningful_words} meaningful words")
+                return full_text
+        
+        # Method 2: Try alternative extraction if standard method fails
+        print("Standard PDF extraction failed, trying alternative method...")
+        pdf_file.seek(0)  # Reset file pointer
+        
+        try:
+            import fitz  # PyMuPDF - better for complex PDFs
+            doc = fitz.open(stream=content, filetype="pdf")
+            alternative_text = ""
+            
+            for page_num in range(len(doc)):
+                page = doc.load_page(page_num)
+                page_text = page.get_text()
+                if page_text.strip():
+                    alternative_text += f"\n--- Page {page_num + 1} ---\n{page_text}\n"
+            
+            doc.close()
+            
+            if alternative_text.strip():
+                alternative_text = re.sub(r'\s+', ' ', alternative_text)
+                alternative_text = re.sub(r'\n\s*\n', '\n', alternative_text)
+                alternative_text = alternative_text.strip()
+                
+                meaningful_words = len(re.findall(r'\b[a-zA-Z]{3,}\b', alternative_text))
+                if meaningful_words > 10:
+                    print(f"Alternative PDF extraction successful: {len(alternative_text)} characters")
+                    return alternative_text
+                    
+        except ImportError:
+            print("PyMuPDF not available, continuing with PyPDF2 only")
+        except Exception as e:
+            print(f"Alternative PDF extraction failed: {e}")
+        
+        # Method 3: Force extract even partial content
+        print("Trying to extract any available text from PDF...")
+        if full_text.strip():
+            return full_text.strip()
+        
+        # Last resort: return raw text extraction attempt
+        return extract_text_fallback(content)
+        
     except Exception as e:
-        print(f"PDF extraction failed: {e}")
+        print(f"PDF extraction completely failed: {e}")
         return extract_text_fallback(content)
 
 def extract_text_fallback(content: bytes) -> str:
+    """Enhanced fallback text extraction for various file types"""
     try:
-        text = content.decode('utf-8', errors='ignore')
-        text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\xff]', ' ', text)
-        text = re.sub(r'\s+', ' ', text).strip()
-        if len(text) < 100:
+        # Method 1: Try UTF-8 decoding
+        try:
+            text = content.decode('utf-8', errors='ignore')
+            text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\xff]', ' ', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            
+            # Check if this looks like meaningful text
+            meaningful_words = len(re.findall(r'\b[a-zA-Z]{3,}\b', text))
+            if meaningful_words > 5 and len(text) > 50:
+                print(f"UTF-8 extraction successful: {len(text)} characters, {meaningful_words} meaningful words")
+                return text
+        except Exception:
+            pass
+        
+        # Method 2: Try Latin-1 encoding
+        try:
             text_latin1 = content.decode('latin-1', errors='ignore')
             text_latin1 = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', ' ', text_latin1)
             text_latin1 = re.sub(r'\s+', ' ', text_latin1).strip()
-            if len(text_latin1) > len(text):
-                text = text_latin1
-        return text or "Document content could not be decoded"
-    except Exception:
-        return "Document content could not be decoded"
+            
+            meaningful_words = len(re.findall(r'\b[a-zA-Z]{3,}\b', text_latin1))
+            if meaningful_words > 5 and len(text_latin1) > 50:
+                print(f"Latin-1 extraction successful: {len(text_latin1)} characters")
+                return text_latin1
+        except Exception:
+            pass
+        
+        # Method 3: Try to detect if this is HTML/XML and extract text
+        content_str = content.decode('utf-8', errors='ignore')
+        if '<html' in content_str.lower() or '<?xml' in content_str.lower():
+            try:
+                # Simple HTML/XML tag removal
+                text = re.sub(r'<[^>]+>', ' ', content_str)
+                text = re.sub(r'&[a-zA-Z0-9#]+;', ' ', text)  # Remove HTML entities
+                text = re.sub(r'\s+', ' ', text).strip()
+                
+                meaningful_words = len(re.findall(r'\b[a-zA-Z]{3,}\b', text))
+                if meaningful_words > 10:
+                    print(f"HTML/XML extraction successful: {len(text)} characters")
+                    return text
+            except Exception:
+                pass
+        
+        # Method 4: Check if this might be a PDF that failed extraction
+        if content.startswith(b'%PDF'):
+            print("Detected PDF file, but text extraction failed")
+            return "This appears to be a PDF file, but text extraction failed. The content may be scanned images or the PDF may be encrypted."
+        
+        # Method 5: Look for any readable text in the binary content
+        readable_text = ""
+        try:
+            # Extract sequences of printable ASCII characters
+            import string
+            current_word = ""
+            for byte in content:
+                char = chr(byte) if byte < 128 else ''
+                if char in string.printable and char not in '\x0b\x0c':
+                    current_word += char
+                else:
+                    if len(current_word) > 3:  # Only keep words longer than 3 chars
+                        readable_text += current_word + " "
+                    current_word = ""
+            
+            if len(current_word) > 3:
+                readable_text += current_word
+                
+            readable_text = re.sub(r'\s+', ' ', readable_text).strip()
+            meaningful_words = len(re.findall(r'\b[a-zA-Z]{3,}\b', readable_text))
+            
+            if meaningful_words > 10 and len(readable_text) > 100:
+                print(f"Binary text extraction found {meaningful_words} meaningful words")
+                return readable_text
+                
+        except Exception:
+            pass
+        
+        # Last resort: return whatever we can decode
+        try:
+            fallback_text = content.decode('utf-8', errors='replace')
+            fallback_text = re.sub(r'[^\x20-\x7E\n\r\t]', ' ', fallback_text)
+            fallback_text = re.sub(r'\s+', ' ', fallback_text).strip()
+            
+            if len(fallback_text) > 20:
+                return fallback_text[:1000] + ("..." if len(fallback_text) > 1000 else "")
+        except Exception:
+            pass
+        
+        return "Document content could not be decoded or extracted"
+        
+    except Exception as e:
+        print(f"All text extraction methods failed: {e}")
+        return f"Document processing failed: {str(e)}"
 
 def smart_chunk_text(text: str) -> List[str]:
     sentences = re.split(r'(?<=[.!?])\s+', text)
@@ -350,24 +494,68 @@ async def health():
         "timestamp": "2025-07-31"
     }
 
-@app.get("/test-apis")
-async def test_apis():
-    """Test API connectivity"""
-    results = {
-        "openai_available": bool(Config.OPENAI_API_KEY),
-        "google_available": bool(Config.GOOGLE_API_KEY),
-        "huggingface_available": bool(Config.HUGGINGFACE_API_KEY),
-    }
+@app.get("/test-document")
+async def test_document_extraction():
+    """Test document extraction with a sample document"""
+    test_urls = [
+        "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf",
+        "https://raw.githubusercontent.com/microsoft/vscode/main/README.md"
+    ]
     
-    # Quick test of embedding generation
-    try:
-        test_embedding = await get_embedding("test text")
-        results["embedding_working"] = len(test_embedding) > 0
-        results["embedding_size"] = len(test_embedding)
-    except Exception as e:
-        results["embedding_error"] = str(e)
+    results = {}
+    for url in test_urls:
+        try:
+            doc_text = await fetch_document(url)
+            results[url] = {
+                "success": True,
+                "length": len(doc_text),
+                "preview": doc_text[:500] + "..." if len(doc_text) > 500 else doc_text,
+                "word_count": len(doc_text.split()),
+                "meaningful_words": len(re.findall(r'\b[a-zA-Z]{3,}\b', doc_text))
+            }
+        except Exception as e:
+            results[url] = {
+                "success": False,
+                "error": str(e)
+            }
     
     return results
+
+@app.post("/test-extraction")
+async def test_custom_document(request: dict):
+    """Test extraction with a custom document URL"""
+    try:
+        url = request.get("url", "")
+        if not url:
+            raise HTTPException(400, "URL is required")
+        
+        doc_text = await fetch_document(url)
+        
+        # Analyze the content
+        analysis = {
+            "url": url,
+            "success": True,
+            "total_length": len(doc_text),
+            "word_count": len(doc_text.split()),
+            "meaningful_words": len(re.findall(r'\b[a-zA-Z]{3,}\b', doc_text)),
+            "has_pdf_metadata": "PDF" in doc_text[:200].upper(),
+            "preview_start": doc_text[:300] + "..." if len(doc_text) > 300 else doc_text,
+            "preview_end": "..." + doc_text[-300:] if len(doc_text) > 300 else "",
+        }
+        
+        # Test chunking
+        chunks = smart_chunk_text(doc_text)
+        analysis["chunk_count"] = len(chunks)
+        analysis["avg_chunk_size"] = sum(len(chunk) for chunk in chunks) / len(chunks) if chunks else 0
+        
+        return analysis
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "url": request.get("url", "")
+        }
 
 @app.post("/hackrx/run", response_model=RunResponse)
 async def run_submissions(req: RunRequest, http_req: Request):
