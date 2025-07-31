@@ -158,6 +158,7 @@ def find_relevant_chunks(question: str, chunks: List[str], max_chunks: int = 4) 
 async def generate_answer_openai(question: str, context: str) -> Optional[str]:
     """Generate answer using OpenAI"""
     if not Config.OPENAI_API_KEY:
+        print("❌ OpenAI API key not available")
         return None
     
     try:
@@ -167,16 +168,18 @@ async def generate_answer_openai(question: str, context: str) -> Optional[str]:
         
         system_prompt = """You are an expert at reading insurance policy documents. 
         Answer the question based on the provided context. Be specific and include exact details like numbers, percentages, and conditions.
-        If the information is not in the context, say so clearly."""
+        Extract relevant information directly from the context and provide a clear, comprehensive answer.
+        If the context contains the answer, provide it in detail. Do not say the information is not available if it exists in the context."""
         
         user_prompt = f"""Context from insurance policy:
 {context}
 
 Question: {question}
 
-Answer based on the policy context above:"""
+Please provide a detailed answer based on the policy context above. Extract specific information including numbers, percentages, waiting periods, and conditions mentioned in the context."""
 
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        print("📞 Calling OpenAI API...")
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={
@@ -189,7 +192,7 @@ Answer based on the policy context above:"""
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "max_tokens": 300,
+                    "max_tokens": 400,
                     "temperature": 0.1
                 }
             )
@@ -197,10 +200,10 @@ Answer based on the policy context above:"""
             if response.status_code == 200:
                 result = response.json()
                 answer = result["choices"][0]["message"]["content"].strip()
-                print(f"✅ OpenAI answer generated")
+                print(f"✅ OpenAI answer generated: {len(answer)} chars")
                 return answer
             else:
-                print(f"❌ OpenAI API error: {response.status_code}")
+                print(f"❌ OpenAI API error: {response.status_code} - {response.text}")
                 
     except Exception as e:
         print(f"❌ OpenAI error: {e}")
@@ -210,25 +213,29 @@ Answer based on the policy context above:"""
 async def generate_answer_google(question: str, context: str) -> Optional[str]:
     """Generate answer using Google Gemini"""
     if not Config.GOOGLE_API_KEY:
+        print("❌ Google API key not available")
         return None
     
     try:
-        prompt = f"""Based on this insurance policy context, answer the question with specific details:
+        prompt = f"""Based on this insurance policy context, answer the question with specific details extracted from the text.
+Be comprehensive and include exact numbers, percentages, waiting periods, and conditions mentioned in the context.
+Do not say information is unavailable if it exists in the context.
 
 Context: {context}
 
 Question: {question}
 
-Provide a clear answer with exact details from the policy:"""
+Provide a detailed answer with specific information from the policy:"""
         
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        print("📞 Calling Google API...")
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={Config.GOOGLE_API_KEY}",
                 headers={"Content-Type": "application/json"},
                 json={
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {
-                        "maxOutputTokens": 300,
+                        "maxOutputTokens": 400,
                         "temperature": 0.1
                     }
                 }
@@ -237,10 +244,10 @@ Provide a clear answer with exact details from the policy:"""
             if response.status_code == 200:
                 result = response.json()
                 answer = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                print(f"✅ Google answer generated")
+                print(f"✅ Google answer generated: {len(answer)} chars")
                 return answer
             else:
-                print(f"❌ Google API error: {response.status_code}")
+                print(f"❌ Google API error: {response.status_code} - {response.text}")
                 
     except Exception as e:
         print(f"❌ Google error: {e}")
@@ -263,19 +270,29 @@ async def answer_question(question: str, chunks: List[str]) -> str:
     
     # Combine relevant chunks as context
     context = " ".join(relevant_chunks)
+    print(f"📄 Found context: {len(context)} characters")
     
-    # Try OpenAI first
-    answer = await generate_answer_openai(question, context)
-    if answer:
-        return answer
+    # Try OpenAI first with better error handling
+    try:
+        answer = await generate_answer_openai(question, context)
+        if answer and len(answer.strip()) > 10:
+            print("✅ OpenAI provided answer")
+            return answer
+    except Exception as e:
+        print(f"❌ OpenAI failed: {e}")
     
-    # Try Google as fallback
-    answer = await generate_answer_google(question, context)
-    if answer:
-        return answer
+    # Try Google as fallback with better error handling
+    try:
+        answer = await generate_answer_google(question, context)
+        if answer and len(answer.strip()) > 10:
+            print("✅ Google provided answer")
+            return answer
+    except Exception as e:
+        print(f"❌ Google failed: {e}")
     
-    # Fallback response
-    return "I couldn't generate a response due to technical issues with the AI services."
+    # If both AI services fail, return a helpful message with the context
+    print("⚠️ Both AI services failed, providing context excerpt")
+    return f"Based on the policy document context: {context[:500]}..." if len(context) > 500 else f"Based on the policy document: {context}"
 
 @app.get("/")
 async def root():
