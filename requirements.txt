@@ -5,9 +5,4 @@ PyPDF2
 python-dotenv
 numpy
 PyMuPDF
-langchain
-langchain-openai
-langchain-community
-faiss-cpu
-tiktoken
 
