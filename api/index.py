@@ -156,103 +156,101 @@ def find_relevant_chunks(question: str, chunks: List[str], max_chunks: int = 4) 
     return [chunk for chunk, score in chunk_scores[:max_chunks] if score > 1]
 
 async def generate_answer_openai(question: str, context: str) -> Optional[str]:
-    """Generate answer using OpenAI"""
+    """Generate answer using OpenAI with simplified error handling"""
     if not Config.OPENAI_API_KEY:
         print("❌ OpenAI API key not available")
         return None
     
+    # Special handling for general knowledge
+    if "prime minister" in question.lower() and "india" in question.lower():
+        return "Based on general knowledge: The Prime Minister of India is Narendra Modi (as of 2024)."
+    
     try:
-        # Special handling for general knowledge
-        if "prime minister" in question.lower() and "india" in question.lower():
-            return "Based on general knowledge: The Prime Minister of India is Narendra Modi (as of 2024)."
+        system_prompt = "You are an expert at reading insurance policy documents. Answer the question based on the provided context. Be specific and include exact details."
         
-        system_prompt = """You are an expert at reading insurance policy documents. 
-        Answer the question based on the provided context. Be specific and include exact details like numbers, percentages, and conditions.
-        Extract relevant information directly from the context and provide a clear, comprehensive answer.
-        If the context contains the answer, provide it in detail. Do not say the information is not available if it exists in the context."""
-        
-        user_prompt = f"""Context from insurance policy:
-{context}
-
-Question: {question}
-
-Please provide a detailed answer based on the policy context above. Extract specific information including numbers, percentages, waiting periods, and conditions mentioned in the context."""
+        user_prompt = f"Context: {context[:2000]}\n\nQuestion: {question}\n\nAnswer based on the context:"
 
         print("📞 Calling OpenAI API...")
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        
+        payload = {
+            "model": "gpt-3.5-turbo",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "max_tokens": 200,
+            "temperature": 0.1
+        }
+        
+        headers = {
+            "Authorization": f"Bearer {Config.OPENAI_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
             response = await client.post(
                 "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {Config.OPENAI_API_KEY}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "gpt-3.5-turbo",
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "max_tokens": 400,
-                    "temperature": 0.1
-                }
+                headers=headers,
+                json=payload
             )
+            
+            print(f"📋 OpenAI response status: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
                 answer = result["choices"][0]["message"]["content"].strip()
-                print(f"✅ OpenAI answer generated: {len(answer)} chars")
+                print(f"✅ OpenAI success: {len(answer)} characters")
                 return answer
             else:
-                print(f"❌ OpenAI API error: {response.status_code} - {response.text}")
+                error_text = response.text[:200] if response.text else "No error text"
+                print(f"❌ OpenAI API error {response.status_code}: {error_text}")
+                return None
                 
     except Exception as e:
-        print(f"❌ OpenAI error: {e}")
-    
-    return None
+        print(f"❌ OpenAI exception: {str(e)[:200]}")
+        return None
 
 async def generate_answer_google(question: str, context: str) -> Optional[str]:
-    """Generate answer using Google Gemini"""
+    """Generate answer using Google Gemini with simplified error handling"""
     if not Config.GOOGLE_API_KEY:
         print("❌ Google API key not available")
         return None
     
     try:
-        prompt = f"""Based on this insurance policy context, answer the question with specific details extracted from the text.
-Be comprehensive and include exact numbers, percentages, waiting periods, and conditions mentioned in the context.
-Do not say information is unavailable if it exists in the context.
-
-Context: {context}
-
-Question: {question}
-
-Provide a detailed answer with specific information from the policy:"""
+        prompt = f"Based on this policy context, answer the question: {context[:2000]}\n\nQuestion: {question}\n\nAnswer:"
         
         print("📞 Calling Google API...")
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "maxOutputTokens": 200,
+                "temperature": 0.1
+            }
+        }
+        
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0)) as client:
             response = await client.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key={Config.GOOGLE_API_KEY}",
                 headers={"Content-Type": "application/json"},
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "maxOutputTokens": 400,
-                        "temperature": 0.1
-                    }
-                }
+                json=payload
             )
+            
+            print(f"📋 Google response status: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
                 answer = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-                print(f"✅ Google answer generated: {len(answer)} chars")
+                print(f"✅ Google success: {len(answer)} characters")
                 return answer
             else:
-                print(f"❌ Google API error: {response.status_code} - {response.text}")
+                error_text = response.text[:200] if response.text else "No error text"
+                print(f"❌ Google API error {response.status_code}: {error_text}")
+                return None
                 
     except Exception as e:
-        print(f"❌ Google error: {e}")
-    
-    return None
+        print(f"❌ Google exception: {str(e)[:200]}")
+        return None
 
 async def answer_question(question: str, chunks: List[str]) -> str:
     """Answer a question using the document chunks"""
